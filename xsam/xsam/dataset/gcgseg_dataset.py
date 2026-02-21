@@ -6,6 +6,8 @@ import numpy as np
 import torch
 from PIL import Image
 
+from xsam.utils.logging import print_log
+
 from .base_dataset import BaseDataset
 from .utils.catalog import MetadataCatalog
 from .utils.coco import COCO
@@ -268,6 +270,25 @@ class GCGSegDataset(BaseDataset):
             rets = self._process_val_format_data(json_data)
         else:
             raise ValueError(f"Invalid dataset name for GCGSegDataset: {self.data_name}")
+
+        filtered_rets = []
+        missing_image_cnt = 0
+        for ret in rets:
+            image_file = ret.get("image_file", None)
+            if image_file is None:
+                filtered_rets.append(ret)
+                continue
+            image_path = os.path.join(self.image_folder, image_file)
+            if not os.path.exists(image_path):
+                missing_image_cnt += 1
+                continue
+            filtered_rets.append(ret)
+        if missing_image_cnt > 0:
+            print_log(
+                f"Filtered {missing_image_cnt} samples with missing images of {self.data_name}.",
+                logger="current",
+            )
+        rets = filtered_rets
 
         del json_data
         return rets

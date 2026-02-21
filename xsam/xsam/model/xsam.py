@@ -17,6 +17,7 @@ from transformers import AutoConfig
 from transformers.file_utils import ModelOutput
 from transformers.integrations import is_deepspeed_zero3_enabled
 from transformers.modeling_utils import get_parameter_dtype
+
 from xtuner.model.modules import dispatch_modules
 from xtuner.model.modules.dispatch import SUPPORT_FLASH1, SUPPORT_FLASH2
 from xtuner.model.utils import (
@@ -47,7 +48,6 @@ from ..utils.constants import (
 )
 from ..utils.misc import data_sample_to_device
 from .utils import prepare_inputs_labels_for_multimodal
-
 
 @dataclass
 class XSamOutput(ModelOutput):
@@ -213,13 +213,6 @@ class XSamModel(BaseModel):
         self.use_visual_encoder_lora = visual_encoder_lora is not None
         self.use_segmentor_encoder_lora = segmentor_lora is not None
 
-        if self.use_llm_lora:
-            self._prepare_llm_for_lora(llm_lora, use_activation_checkpointing)
-        if self.use_visual_encoder_lora:
-            self._prepare_visual_encoder_for_lora(visual_encoder_lora, use_activation_checkpointing)
-        if self.use_segmentor_encoder_lora:
-            self._prepare_segmentor_for_lora(segmentor_lora, use_activation_checkpointing)
-
         state_dict = super().state_dict()
         if s1_pretrained_pth is not None:
             pretrained_state_dict = guess_load_checkpoint(s1_pretrained_pth)
@@ -248,6 +241,15 @@ class XSamModel(BaseModel):
                 print_log(f"Mismatched keys: {mismatched_keys}", logger="current", level=logging.WARNING)
             if len(missed_keys) > 0:
                 print_log(f"Missed keys: {missed_keys}", logger="current", level=logging.WARNING)
+
+        # Apply LoRA after checkpoint loading so base-model keys can be restored
+        # from non-LoRA checkpoints (e.g. full LLM weights) before PEFT wrapping.
+        if self.use_llm_lora:
+            self._prepare_llm_for_lora(llm_lora, use_activation_checkpointing)
+        if self.use_visual_encoder_lora:
+            self._prepare_visual_encoder_for_lora(visual_encoder_lora, use_activation_checkpointing)
+        if self.use_segmentor_encoder_lora:
+            self._prepare_segmentor_for_lora(segmentor_lora, use_activation_checkpointing)
 
         self.visual_select_layer = visual_select_layer
         self.visual_select_indx = visual_select_indx
@@ -458,20 +460,35 @@ class XSamModel(BaseModel):
                     output_hidden_states=True,
                     output_attentions=False,
                 )
+                # SAM2 HF vision encoder returns fpn_hidden_states (C,H,W) with C=fpn_hidden_size
                 seg_image_embeddings = (
-                    seg_visual_outputs.last_hidden_state
+                    seg_visual_outputs.fpn_hidden_states
+                    if hasattr(seg_visual_outputs, "fpn_hidden_states")
+                    else seg_visual_outputs.last_hidden_state
                     if hasattr(seg_visual_outputs, "last_hidden_state")
                     else seg_visual_outputs.hidden_states[-1].transpose(1, 2)
                 )
                 extra_pixel_values = None
                 if hasattr(self, "seg_projector"):
-                    extra_pixel_values = self.seg_projector(seg_visual_outputs.hidden_states[self.visual_select_layer])
+                    if hasattr(seg_visual_outputs, "fpn_hidden_states"):
+                        feats = seg_visual_outputs.fpn_hidden_states[self.visual_select_layer]
+                        # projector expects channels-last 4D for pixel shuffle
+                        extra_pixel_values = self.seg_projector(feats.permute(0, 2, 3, 1))
+                    else:
+                        extra_pixel_values = self.seg_projector(
+                            seg_visual_outputs.hidden_states[self.visual_select_layer]
+                        )
                     extra_pixel_values = extra_pixel_values.to(self.llm.dtype)
 
                 if hasattr(self, "seg_connector"):
-                    seg_image_embeddings = self.seg_connector(
-                        [seg_visual_outputs.hidden_states[i] for i in self.seg_select_layers]
-                    )
+                    if hasattr(seg_visual_outputs, "fpn_hidden_states"):
+                        seg_image_embeddings = self.seg_connector(
+                            [seg_visual_outputs.fpn_hidden_states[i] for i in self.seg_select_layers]
+                        )
+                    else:
+                        seg_image_embeddings = self.seg_connector(
+                            [seg_visual_outputs.hidden_states[i] for i in self.seg_select_layers]
+                        )
                 elif self.segmentor.pixel_decoder is not None and hasattr(seg_visual_outputs, "feature_maps"):
                     seg_image_embeddings = seg_visual_outputs.feature_maps
 

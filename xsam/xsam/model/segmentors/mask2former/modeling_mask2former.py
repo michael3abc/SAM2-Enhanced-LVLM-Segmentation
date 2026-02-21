@@ -36,7 +36,9 @@ from transformers.file_utils import (
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithCrossAttentions
 from transformers.modeling_utils import PreTrainedModel
 from transformers.pytorch_utils import is_torch_greater_or_equal_than_2_1
+
 from transformers.utils.backbone_utils import load_backbone
+
 from transformers.utils.import_utils import is_torchdynamo_compiling
 
 from .configuration_mask2former import Mask2FormerConfig

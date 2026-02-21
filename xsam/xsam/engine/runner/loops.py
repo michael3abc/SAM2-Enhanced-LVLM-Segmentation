@@ -107,15 +107,29 @@ class TrainLoop(XSamIterBasedTrainLoop):
             raise RuntimeError("Only one of `max_iters` or `max_epochs` can " "exist in `train_cfg`.")
         else:
             if max_iters is not None:
-                iters = int(max_iters)
-                assert iters == max_iters, "`max_iters` should be a integer " f"number, but get {max_iters}"
+                raw_iters = float(max_iters)
+                iters = int(round(raw_iters))
+                if raw_iters != iters:
+                    print_log(
+                        f"`max_iters`={raw_iters} is non-integer; rounded to {iters}.",
+                        logger="current",
+                        level=logging.WARNING,
+                    )
             elif max_epochs is not None:
                 if isinstance(dataloader, dict):
                     diff_rank_seed = runner._randomness_cfg.get("diff_rank_seed", False)
                     dataloader = runner.build_dataloader(dataloader, seed=runner.seed, diff_rank_seed=diff_rank_seed)
-                iters = max_epochs * len(dataloader)
+                raw_iters = float(max_epochs) * len(dataloader)
+                iters = int(round(raw_iters))
+                if raw_iters != iters:
+                    print_log(
+                        f"`max_epochs * len(dataloader)`={raw_iters} is non-integer; rounded to {iters}.",
+                        logger="current",
+                        level=logging.WARNING,
+                    )
             else:
                 raise NotImplementedError
+        iters = max(iters, 1)
 
         print_log(f"Training max_iters: {iters}.", logger="current")
         super().__init__(runner=runner, dataloader=dataloader, max_iters=iters, **kwargs)

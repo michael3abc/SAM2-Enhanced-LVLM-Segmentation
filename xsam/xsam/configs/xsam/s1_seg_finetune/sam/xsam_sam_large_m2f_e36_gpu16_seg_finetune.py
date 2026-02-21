@@ -26,7 +26,7 @@ from xsam.model.segmentors.sam import SamModel
 code_dir = getenv("CODE_DIR", "./xsam/")
 data_dir = getenv("DATA_DIR", "./datas/")
 init_dir = getenv("INIT_DIR", "./inits/")
-work_dir = getenv("WORK_DIR", "./wkdrs/")
+work_dir = getenv("WORK_DIR", "./runs/")
 
 # Model
 seg_encoder_name_or_path = init_dir + "sam-vit-large"

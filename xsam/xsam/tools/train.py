@@ -7,6 +7,7 @@ import warnings
 from functools import partial
 from types import FunctionType
 
+import torch
 from mmengine.config import Config, DictAction
 from mmengine.config.lazy import LazyObject
 from mmengine.model import BaseModel
@@ -29,6 +30,47 @@ from xsam.utils.utils import register_function
 
 set_default_logging_format()
 warnings.filterwarnings("ignore")
+
+
+def _load_seed_from_checkpoint_compat(pth_model: str) -> int:
+    """Load training seed from checkpoint with torch>=2.6 compatibility.
+
+    Args:
+        pth_model: Checkpoint file path or DeepSpeed checkpoint directory.
+
+    Returns:
+        Seed value stored in checkpoint metadata.
+    """
+    try:
+        return get_seed_from_checkpoint(pth_model)
+    except Exception as err:
+        # torch>=2.6 defaults to weights_only=True and may reject ConfigDict objects.
+        if "Weights only load failed" not in str(err):
+            raise
+
+        if osp.isfile(pth_model):
+            filename = pth_model
+        elif osp.isdir(pth_model):
+            try:
+                from deepspeed.utils.zero_to_fp32 import get_model_state_files
+            except ImportError as imp_err:
+                raise ImportError(
+                    "Need deepspeed to read seed from a DeepSpeed checkpoint directory."
+                ) from imp_err
+            filename = get_model_state_files(pth_model)[0]
+        else:
+            raise FileNotFoundError(f"Cannot find {pth_model}")
+
+        print_log(
+            (
+                "Fallback to `torch.load(..., weights_only=False)` for resumed seed "
+                f"from checkpoint: {filename}"
+            ),
+            logger="current",
+            level=logging.WARNING,
+        )
+        checkpoint = torch.load(filename, map_location="cpu", weights_only=False)
+        return checkpoint["meta"]["seed"]
 
 
 def parse_args():
@@ -143,6 +185,10 @@ def main():
     # load config
     cfg = Config.fromfile(args.config)
     set_model_resource(cfg)
+    # Some lazy-built configs contain runtime objects (e.g. <class ...>, bound methods)
+    # that are not valid Python literals for yapf verification in cfg.pretty_text.
+    # Disable formatting verification to avoid crashing during runner env logging.
+    cfg._format_python_code = False
 
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
@@ -242,9 +288,9 @@ def main():
             backend = get_file_backend(args.resume)
             if isinstance(backend, PetrelBackend):
                 with patch_fileio():
-                    resumed_seed = get_seed_from_checkpoint(args.resume)
+                    resumed_seed = _load_seed_from_checkpoint_compat(args.resume)
             else:
-                resumed_seed = get_seed_from_checkpoint(args.resume)
+                resumed_seed = _load_seed_from_checkpoint_compat(args.resume)
             cfg.merge_from_dict(dict(randomness=dict(seed=resumed_seed)))
             if args.seed is not None and args.seed != resumed_seed:
                 print_log(

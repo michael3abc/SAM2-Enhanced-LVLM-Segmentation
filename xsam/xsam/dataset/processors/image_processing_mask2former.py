@@ -28,6 +28,8 @@ from transformers.image_transforms import (
     to_channel_dimension_format,
 )
 from transformers.image_utils import (
+    IMAGENET_DEFAULT_MEAN,
+    IMAGENET_DEFAULT_STD,
     ChannelDimension,
     ImageInput,
     PILImageResampling,

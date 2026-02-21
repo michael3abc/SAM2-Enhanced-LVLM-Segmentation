@@ -104,7 +104,6 @@ class ImgConvDataset(BaseDataset):
             if "image" not in d:
                 continue
             d["image_file"] = d.pop("image")
-
         return data
 
     def __getitem__(self, index):
@@ -128,23 +127,60 @@ class ImgConvDataset(BaseDataset):
                 data_dict["task_name"] = self.task_name
             data_dict.update(self._get_input_ids(data_dict, with_image_token=True))
         elif self.is_multimodal:
-            if hasattr(self.image_processor, "crop_size"):
+            crop_size = None
+            if hasattr(self.image_processor, "crop_size") and self.image_processor.crop_size is not None:
                 crop_size = self.image_processor.crop_size
-            else:
+            elif hasattr(self.image_processor, "size") and self.image_processor.size is not None:
                 crop_size = self.image_processor.size
-            data_dict["pixel_values"] = torch.zeros(3, crop_size["height"], crop_size["width"])
+
+            image_h, image_w = None, None
+            if isinstance(crop_size, dict):
+                if "height" in crop_size and "width" in crop_size:
+                    image_h, image_w = int(crop_size["height"]), int(crop_size["width"])
+                elif "shortest_edge" in crop_size:
+                    image_h = image_w = int(crop_size["shortest_edge"])
+                elif "longest_edge" in crop_size:
+                    image_h = image_w = int(crop_size["longest_edge"])
+                elif "target_size" in crop_size and isinstance(crop_size["target_size"], int):
+                    image_h = image_w = int(crop_size["target_size"])
+            elif isinstance(crop_size, (tuple, list)) and len(crop_size) >= 2:
+                image_h, image_w = int(crop_size[0]), int(crop_size[1])
+            elif isinstance(crop_size, int):
+                image_h = image_w = int(crop_size)
+
+            if image_h is None or image_w is None:
+                raise ValueError(f"Invalid image processor size config for multimodal fallback: {crop_size}")
+
+            data_dict["pixel_values"] = torch.zeros(3, image_h, image_w)
             if self.extra_image_processor is not None:
-                if hasattr(self.extra_image_processor, "crop_size"):
+                crop_size = None
+                if hasattr(self.extra_image_processor, "crop_size") and self.extra_image_processor.crop_size is not None:
                     crop_size = self.extra_image_processor.crop_size
-                elif hasattr(self.extra_image_processor, "pad_size"):
+                elif hasattr(self.extra_image_processor, "pad_size") and self.extra_image_processor.pad_size is not None:
                     crop_size = self.extra_image_processor.pad_size
-                else:
+                elif hasattr(self.extra_image_processor, "size") and self.extra_image_processor.size is not None:
                     crop_size = self.extra_image_processor.size
-                data_dict["extra_pixel_values"] = torch.zeros(3, crop_size["height"], crop_size["width"])
+
+                extra_h, extra_w = image_h, image_w
+                if isinstance(crop_size, dict):
+                    if "height" in crop_size and "width" in crop_size:
+                        extra_h, extra_w = int(crop_size["height"]), int(crop_size["width"])
+                    elif "shortest_edge" in crop_size:
+                        extra_h = extra_w = int(crop_size["shortest_edge"])
+                    elif "longest_edge" in crop_size:
+                        extra_h = extra_w = int(crop_size["longest_edge"])
+                    elif "target_size" in crop_size and isinstance(crop_size["target_size"], int):
+                        extra_h = extra_w = int(crop_size["target_size"])
+                elif isinstance(crop_size, (tuple, list)) and len(crop_size) >= 2:
+                    extra_h, extra_w = int(crop_size[0]), int(crop_size[1])
+                elif isinstance(crop_size, int):
+                    extra_h = extra_w = int(crop_size)
+
+                data_dict["extra_pixel_values"] = torch.zeros(3, extra_h, extra_w)
                 data_dict["image_file"] = None
-                data_dict["image_size"] = {"height": crop_size["height"], "width": crop_size["width"]}
+                data_dict["image_size"] = {"height": extra_h, "width": extra_w}
                 data_dict["image_info"] = {"image_file": None}
-                data_dict["scaled_size"] = (crop_size["height"], crop_size["width"])
+                data_dict["scaled_size"] = (extra_h, extra_w)
                 data_dict["task_name"] = self.task_name
             data_dict.update(self._get_input_ids(data_dict, with_image_token=False))
         else:

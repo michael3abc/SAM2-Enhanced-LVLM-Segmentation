@@ -25,7 +25,7 @@ from xsam.utils.template import PROMPT_TEMPLATE
 code_dir = getenv("CODE_DIR", "./xsam/")
 data_dir = getenv("DATA_DIR", "./datas/")
 init_dir = getenv("INIT_DIR", "./inits/")
-work_dir = getenv("WORK_DIR", "./wkdrs/")
+work_dir = getenv("WORK_DIR", "./runs/")
 
 # Model
 llm_name_or_path = init_dir + "Qwen3-4B-Instruct-2507"

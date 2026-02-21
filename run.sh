@@ -12,12 +12,49 @@ log_format="[$log_time] [INFO] [$0]"
 #                          PART 2  Project Config                      #
 #######################################################################
 # Directory
-root_dir=${root_dir:-$(realpath $(dirname $0)/../)}
+script_dir="$(realpath "$(dirname "$0")")"
+if [[ -z "${root_dir:-}" ]]; then
+    if [[ -d "$script_dir/xsam" ]]; then
+        root_dir="$script_dir"
+    else
+        root_dir="$(realpath "$script_dir/../")"
+    fi
+fi
+
+# Force runtime to use the project virtual environment.
+venv_dir="${VENV_DIR:-}"
+if [[ -z "$venv_dir" ]]; then
+    probe_dir="$script_dir"
+    while true; do
+        if [[ -x "$probe_dir/.venv/bin/python" ]]; then
+            venv_dir="$probe_dir/.venv"
+            break
+        fi
+        parent_dir="$(dirname "$probe_dir")"
+        if [[ "$parent_dir" == "$probe_dir" ]]; then
+            break
+        fi
+        probe_dir="$parent_dir"
+    done
+fi
+if [[ -z "$venv_dir" || ! -x "$venv_dir/bin/python" ]]; then
+    echo -e "$log_format .venv python not found. Set VENV_DIR or create .venv first."
+    exit 1
+fi
+python_cmd="$venv_dir/bin/python"
+if [[ -x "$venv_dir/bin/torchrun" ]]; then
+    torchrun_cmd=("$venv_dir/bin/torchrun")
+else
+    torchrun_cmd=("$python_cmd" "-m" "torch.distributed.run")
+fi
+export PATH="$venv_dir/bin:$PATH"
+
 code_name="xsam"
 code_dir="$root_dir/$code_name"
+src_code_dir="$code_dir"
 data_dir="$root_dir/datas"
 init_dir="$root_dir/inits"
-work_dir="$root_dir/wkdrs"
+work_dir="$root_dir/runs"
 export ROOT_DIR="$root_dir/"
 export DATA_DIR="$data_dir/"
 export INIT_DIR="$init_dir/"
@@ -28,8 +65,14 @@ export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
 export TRANSFORMERS_VERBOSITY=error
 export TOKENIZERS_PARALLELISM=false
+# Torch>=2.6 defaults torch.load(weights_only=True), which breaks resuming
+# checkpoints that contain ConfigDict metadata.
+export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 export XTUNER_DATASET_TIMEOUT=120
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+export CUDA_VISIBLE_DEVICES=0
+export GPU_PER_NODE=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 export NCCL_NET_GDR_LEVEL=2
 export MKL_NUM_THREADS=4
@@ -133,7 +176,7 @@ else
     vlm_name="xsam-phi3-siglip2-sam-l-mft"
 fi
 
-if [[ "$work_dir" == "$root_dir/wkdrs" || "$work_dir" == "$root_dir/wkdrs/" ]]; then
+if [[ "$work_dir" == "$root_dir/runs" || "$work_dir" == "$root_dir/runs/" ]]; then
     suffix_norm=""
     if [[ -n "$suffix" ]]; then
         if [[ "$suffix" == -* ]]; then
@@ -177,6 +220,23 @@ fi
 master_addr="${MASTER_ADDR:-localhost}"
 master_port="${MASTER_PORT:-29500}"
 node_rank="${NODE_RANK:-0}"
+deepspeed_cfg="${DEEPSPEED_CFG:-}"
+if [[ -z "$deepspeed_cfg" ]]; then
+    is_wsl=0
+    if [[ -r /proc/version ]] && grep -qi microsoft /proc/version; then
+        is_wsl=1
+    fi
+    if [[ "$gpu_per_node" -le 1 ]]; then
+        if [[ "$is_wsl" -eq 1 ]]; then
+            deepspeed_cfg="deepspeed_zero2"
+        else
+            deepspeed_cfg="deepspeed_zero2_offload"
+        fi
+    else
+        deepspeed_cfg="deepspeed_zero2"
+    fi
+fi
+echo -e "$log_format DeepSpeed config: $deepspeed_cfg"
 
 # Run
 for mode in "${modes[@]}"
@@ -195,6 +255,22 @@ do
         code_dir="$work_dir/$code_name"
         cp $(realpath $0) $work_dir
     fi
+
+    # Always sync latest source config into work_dir snapshot to avoid stale copied configs.
+    source_cfg_abs="$root_dir/$config_file"
+    [ -f "$source_cfg_abs" ] || source_cfg_abs="$root_dir/${config_file#$code_name/}"
+    if [ -d "$work_dir/$code_name" ] && [ -f "$source_cfg_abs" ]; then
+        if [[ "$source_cfg_abs" == "$src_code_dir/"* ]]; then
+            cfg_rel="${source_cfg_abs#$src_code_dir/}"
+        else
+            cfg_rel="${config_file#$code_name/}"
+        fi
+        mkdir -p "$code_dir/$(dirname "$cfg_rel")"
+        cp -f "$source_cfg_abs" "$code_dir/$cfg_rel"
+        config_file="$cfg_rel"
+        echo -e "$log_format Synced config to snapshot: $cfg_rel"
+    fi
+
     cd $code_dir
     export CODE_DIR="$code_dir/"
     echo -e "$log_format code_dir: $code_dir"
@@ -207,13 +283,13 @@ do
     if [ $mode = "train" ]; then
         echo -e "$log_format Training $model_name."
         PYTHONPATH="$(realpath $code_dir)":$PYTHONPATH OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-            torchrun --master_addr=$master_addr --master_port=$master_port --nproc_per_node=$gpu_per_node \
+            "${torchrun_cmd[@]}" --master_addr=$master_addr --master_port=$master_port --nproc_per_node=$gpu_per_node \
             $code_dir/xsam/tools/train.py \
             $config_file \
             --work-dir $work_dir \
             --resume auto \
             --launcher pytorch \
-            --deepspeed deepspeed_zero2 \
+            --deepspeed $deepspeed_cfg \
             --seed 1024 | { [ $node_rank = "0" ] && tee $work_dir/${mode}-${time}.log || cat; }
     fi
     # Check if training completed successfully
@@ -225,7 +301,7 @@ do
         echo -e "$log_format Evaluating Seg: $model_name."
         [ $node_rank -ne 0 ] && sleep 60
         PYTHONPATH="$(realpath $code_dir)":$PYTHONPATH OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-            torchrun --master_addr=$master_addr --master_port=$master_port --nproc_per_node=$gpu_per_node \
+            "${torchrun_cmd[@]}" --master_addr=$master_addr --master_port=$master_port --nproc_per_node=$gpu_per_node \
             $code_dir/xsam/tools/eval.py \
             $config_file \
             --launcher pytorch \
@@ -238,7 +314,7 @@ do
         if [ $node_rank = 0 ] && [ ! -d "$work_dir/xtuner_model" ]; then
             echo -e "$log_format Converting $model_name to HF format."
             PYTHONPATH="$(realpath $code_dir)":$PYTHONPATH \
-                python $code_dir/xsam/tools/model_tools/pth_to_hf.py \
+                "$python_cmd" $code_dir/xsam/tools/model_tools/pth_to_hf.py \
                 $code_dir/$config_file \
                 $work_dir
         fi
@@ -253,7 +329,7 @@ do
             echo -e "$log_format Evaluating VLM: $model_name."
             [ $node_rank -ne 0 ] && sleep 30
             PYTHONPATH="$(realpath $code_dir)":$PYTHONPATH OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-                torchrun --master_addr=$master_addr --master_port=$master_port --nproc_per_node=$gpu_per_node \
+                "${torchrun_cmd[@]}" --master_addr=$master_addr --master_port=$master_port --nproc_per_node=$gpu_per_node \
                 $code_dir/xsam/evaluation/vlmeval/run.py \
                 --data MME MMBench_DEV_EN SEEDBench_IMG POPE AI2D_TEST \
                 --model $vlm_name \
@@ -264,7 +340,7 @@ do
     if [ $mode = "visualize" ] && [ $trained_flag = 1 ] && [ $node_rank = 0 ]; then
         echo -e "$log_format Visualizing $model_name."
         PYTHONPATH="$(realpath $code_dir)":$PYTHONPATH OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-            python $code_dir/xsam/tools/visualize.py \
+            "$python_cmd" $code_dir/xsam/tools/visualize.py \
             $config_file \
             --work-dir $work_dir \
             --seed 0 \
@@ -275,7 +351,7 @@ do
         echo -e "$log_format Demoing $model_name."
         mkdir -p "$work_dir/app_logs"
         PYTHONPATH="$(realpath $code_dir)":$PYTHONPATH OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-            python $code_dir/xsam/demo/app.py \
+            "$python_cmd" $code_dir/xsam/demo/app.py \
             $config_file \
             --work-dir $work_dir \
             --log-dir $work_dir/app_logs \

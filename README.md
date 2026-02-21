@@ -117,7 +117,7 @@ X-SAM
 │   │   ├── structures
 │   │   ├── tools
 │   │   └── utils
-├── wkdrs
+├── runs
 │   ├── s1_seg_finetune
 │   │   ├── ...
 │   ├── s2_align_pretrain
@@ -189,10 +189,10 @@ There are many datasets and models to prepare, please refer to [Dataset Preparin
 :sparkles: **One Script for All !**
 ```bash
 cd $root_dir
-bash runs/run.sh --modes MODES --config CONFIG_FILE --work-dir WORK_DIR --suffix WORK_DIR_SUFFIX
+bash run.sh --modes MODES --config CONFIG_FILE --work-dir WORK_DIR --suffix WORK_DIR_SUFFIX
 # MODES: train, segeval, vlmeval, visualize, demo
-# bash runs/run.sh -h # echo help.
-# Read the runs/run.sh for more details.
+# bash run.sh -h # echo help.
+# Read the run.sh for more details.
 # debug mode: export DEBUG_MODE=true
 ```
 Prepare the [Datasets](docs/dataset_preparing.md) and [Models](docs/model_preparing.md), and then refer to the following commands to start training and evaluation.
@@ -206,19 +206,19 @@ Prepare the [Datasets](docs/dataset_preparing.md) and [Models](docs/model_prepar
 ##### Stage 1: Segmentor Fine-tuning
 ```bash
 cd $root_dir
-bash runs/run.sh --modes train --config xsam/configs/xsam/s1_seg_finetune/xsam_sam_large_m2f_e36_gpu16_seg_finetune.py
+bash run.sh --modes train --config xsam/configs/xsam/s1_seg_finetune/xsam_sam_large_m2f_e36_gpu16_seg_finetune.py
 ```
 
 ##### Stage 2: Alignment Pre-training
 ```bash
 cd $root_dir
-bash runs/run.sh --modes train --config xsam/configs/xsam/s2_align_pretrain/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_e1_gpu16_align_pretrain.py
+bash run.sh --modes train --config xsam/configs/xsam/s2_align_pretrain/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_e1_gpu16_align_pretrain.py
 ```
 
 ##### Stage 3: Mixed Fine-tuning
 ```bash
 cd $root_dir
-bash runs/run.sh --modes train,segeval,vlmeval,visualize --config xsam/configs/xsam/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune.py
+bash run.sh --modes train,segeval,vlmeval,visualize --config xsam/configs/xsam/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune.py
 ```
 </details>
 
@@ -229,14 +229,14 @@ bash runs/run.sh --modes train,segeval,vlmeval,visualize --config xsam/configs/x
 ```bash
 cd $root_dir
 # Evaluate on all segmentation benchmarks.
-bash runs/run.sh --modes segeval --config xsam/configs/xsam/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune.py --work-dir $root_dir/inits/X-SAM/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune
+bash run.sh --modes segeval --config xsam/configs/xsam/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune.py --work-dir $root_dir/inits/X-SAM/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune
 ```
 
 ##### Evaluate on all VLM benchmarks
 ```bash
 cd $root_dir
 # Evaluate on all VLM benchmarks.
-bash runs/run.sh --modes vlmeval --config xsam/configs/xsam/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune.py --work-dir $root_dir/inits/X-SAM/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune
+bash run.sh --modes vlmeval --config xsam/configs/xsam/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune.py --work-dir $root_dir/inits/X-SAM/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune
 ```
 
 </details>
@@ -249,13 +249,13 @@ bash runs/run.sh --modes vlmeval --config xsam/configs/xsam/s3_mixed_finetune/xs
 ##### Stage 1: Alignment Pre-training
 ```bash
 cd $root_dir
-bash runs/run.sh --modes train --config xsam/configs/llava/s1_pretrain/llava_phi3_mini_4k_instruct_siglip2_so400m_p14_384_e1_gpu16_pretrain.py
+bash run.sh --modes train --config xsam/configs/llava/s1_pretrain/llava_phi3_mini_4k_instruct_siglip2_so400m_p14_384_e1_gpu16_pretrain.py
 ```
 
 ##### Stage 2: Instruction Fine-tuning
 ```bash
 cd $root_dir
-bash runs/run.sh --modes train --config xsam/configs/llava/s2_finetune/llava_phi3_mini_4k_instruct_siglip2_so400m_p14_384_e1_gpu16_finetune.py
+bash run.sh --modes train --config xsam/configs/llava/s2_finetune/llava_phi3_mini_4k_instruct_siglip2_so400m_p14_384_e1_gpu16_finetune.py
 ```
 </details>
 
@@ -265,7 +265,7 @@ bash runs/run.sh --modes train --config xsam/configs/llava/s2_finetune/llava_phi
 ##### Evaluate on all VLM benchmarks
 ```bash
 cd $root_dir
-bash runs/run.sh --modes vlmeval --config xsam/configs/llava/s2_finetune/llava_phi3_mini_4k_instruct_siglip2_so400m_p14_384_e1_gpu16_finetune.py
+bash run.sh --modes vlmeval --config xsam/configs/llava/s2_finetune/llava_phi3_mini_4k_instruct_siglip2_so400m_p14_384_e1_gpu16_finetune.py
 ```
 </details>
 
@@ -294,7 +294,7 @@ python xsam/xsam/demo/demo.py xsam/xsam/configs/xsam/s3_mixed_finetune/xsam_phi3
 
 ```bash
 cd $root_dir
-bash runs/run.sh --modes demo --config xsam/configs/xsam/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune.py --work-dir $root_dir/inits/X-SAM/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune
+bash run.sh --modes demo --config xsam/configs/xsam/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune.py --work-dir $root_dir/inits/X-SAM/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune
 ```
 </details>
 

@@ -269,6 +269,7 @@ class XSamDemo:
                 type=process_map_fn_factory,
                 fn=genseg_postprocess_fn,
                 task_name="genseg(ins)",
+                return_coco_annotation=False,
             ),
             "refseg": refseg_postprocess_fn,
             "reaseg": reaseg_postprocess_fn,
@@ -371,7 +372,9 @@ class XSamDemo:
         stuff_classes = [x.strip() for x in sem_match.group(1).split(",") if len(x.strip()) > 0] if sem_match else []
         all_classes = thing_classes + stuff_classes
         all_classes = random.sample(all_classes, len(all_classes))
-        assert len(all_classes) > 0, "Please provide at least one thing or stuff class"
+        if len(all_classes) == 0:
+            all_classes = ["object"]
+            thing_classes = ["object"]
         if len(thing_classes) > 0 and len(stuff_classes) > 0:
             task_name = "genseg(pan)"
         elif len(thing_classes) > 0 and len(stuff_classes) == 0:
@@ -520,6 +523,8 @@ class XSamDemo:
         return metadata
 
     def run_on_image(self, image, prompt, task_name, vprompt_masks=None, **kwargs):
+        if task_name == "segmentation":
+            task_name = "genseg"
         mode = "tensor" if self.output_ids_with_output else "predict"
         data_dict = {"pil_image": image, "vprompt_masks": vprompt_masks, "task_name": task_name}
 
@@ -574,6 +579,14 @@ class XSamDemo:
         print_log(f"Sample output of {task_name}:\n" f"{llm_input + generation_output}\n", logger="current")
         self.visualizer.metadata = metadata
 
+        if seg_outputs is None or len(seg_outputs) == 0 or seg_outputs[0] is None:
+            print_log(
+                f"No segmentation outputs returned for {task_name}. "
+                "Skip visualization and return text output only.",
+                logger="current",
+            )
+            return llm_input, generation_output, None
+
         try:
             visualized_image = self.visualizer.draw_predictions(
                 image,
@@ -612,6 +625,19 @@ def main():
         print_log(f"Set the random seed to {args.seed}.", logger="current")
     register_function(cfg._cfg_dict)
 
+    # Auto-discover checkpoint when --pth_model is omitted.
+    if args.pth_model is None and args.work_dir:
+        candidate_paths = []
+        direct_ckpt = osp.join(args.work_dir, "pytorch_model.bin")
+        if osp.exists(direct_ckpt):
+            candidate_paths.append(direct_ckpt)
+        for root, _, files in os.walk(args.work_dir):
+            if "pytorch_model.bin" in files:
+                candidate_paths.append(osp.join(root, "pytorch_model.bin"))
+        if len(candidate_paths) > 0:
+            args.pth_model = max(set(candidate_paths), key=osp.getmtime)
+            print_log(f"Auto-selected checkpoint: {args.pth_model}", logger="current")
+
     # Handle latest checkpoint
     if args.pth_model == "latest":
         from mmengine.runner import find_latest_checkpoint
@@ -623,6 +649,11 @@ def main():
         else:
             raise ValueError("work_dir must be specified when using 'latest' checkpoint")
         print_log(f"Found latest checkpoint: {args.pth_model}", logger="current")
+    elif args.pth_model is None:
+        print_log(
+            "No checkpoint provided. Demo will run with base initialization only, and segmentation outputs may be None.",
+            logger="current",
+        )
 
     # Create demo instance
     demo = XSamDemo(cfg, args.pth_model, output_ids_with_output=False)
@@ -668,3 +699,17 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+"""
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+python xsam/xsam/demo/demo.py \
+  xsam/xsam/configs/xsam/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_768_m2f_gpu16_mixed_finetune.py \
+  --image data/coco2017/train2017/000000000009.jpg \
+  --prompt "ins: broccoli, bread, muffin, almonds; sem: tray" \
+  --task_name genseg \
+  --score_thr 0.15 \
+  --work-dir runs \
+  --pth_model inits/X-SAM/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune/pytorch_model.sam2_reuse_with_sam2encoder_pixeldecoder.bin \
+  --cfg-options model.use_dual_encoder=False model.use_vision_sampler=False model.sampler_input_feat='pixel_values'
+
+"""

@@ -1,11 +1,11 @@
 from copy import deepcopy
-from os import getenv
 
 import torch
 from mmengine.hooks import CheckpointHook, DistSamplerSeedHook, IterTimerHook, LoggerHook, ParamSchedulerHook
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from torch.optim import AdamW
-from transformers import AutoModelForCausalLM, AutoTokenizer, SiglipProcessor, SiglipVisionModel
+from transformers import AutoModelForCausalLM, AutoTokenizer, SiglipImageProcessor, SiglipVisionModel
+from xtuner.utils import PROMPT_TEMPLATE
 
 from xsam.dataset import (
     ConcatDataset,
@@ -41,7 +41,7 @@ from xsam.dataset.process_fns import (
     refseg_postprocess_fn,
     vgdseg_postprocess_fn,
 )
-from xsam.dataset.processors import SamImageProcessor
+from xsam.dataset.processors import Sam2ImageProcessor, SamImageProcessor
 from xsam.dataset.samplers import SourceGroupedSampler
 from xsam.engine.hooks import DatasetInfoHook, EvaluateChatHook, ModelInfoHook, PTCheckpointHook
 from xsam.engine.runner import TrainLoop
@@ -57,40 +57,39 @@ from xsam.evaluation.evaluators import (
 from xsam.model import XSamModel
 from xsam.model.segmentors import XSegmentor
 from xsam.model.segmentors.mask2former import Mask2FormerConfig, Mask2FormerModel
-from xsam.model.segmentors.sam import SamModel
-from xsam.utils.template import PROMPT_TEMPLATE
+from xsam.model.segmentors.sam2 import Sam2Model
 from xsam.utils.visualize import Visualizer
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Directories
-code_dir = getenv("CODE_DIR", "./xsam/")
-data_dir = getenv("DATA_DIR", "./datas/")
-init_dir = getenv("INIT_DIR", "./inits/")
-work_dir = getenv("WORK_DIR", "./runs/")
+# NOTE:
+# mmengine lazy config does not allow calling imported functions (e.g. getenv) at parse time.
+# Keep deterministic defaults here and override via `--cfg-options` when needed.
+code_dir = "./xsam/"
+data_dir = "./datas/"
+init_dir = "./inits/"
+work_dir = "./runs/"
 
 # Model
-llm_name_or_path = init_dir + "Qwen3-1.7B"
+llm_name_or_path = init_dir + "Phi-3-mini-4k-instruct"
 visual_encoder_name_or_path = init_dir + "siglip2-so400m-patch14-384"
-seg_encoder_name_or_path = init_dir + "sam-vit-large"
+seg_encoder_name_or_path = init_dir + "sam2.1-hiera-large"
 seg_decoder_name_or_path = init_dir + "mask2former-swin-large-coco-panoptic"
 
 # Specify the pretrained pth
 # Case1: Uncomment the following for training from scratch
-s1_pretrained_pth = work_dir + "s1_seg_finetune/xsam_sam_large_m2f_e36_gpu16_seg_finetune/pytorch_model.bin"
-s2_pretrained_pth = (
-    work_dir
-    + "s2_align_pretrain/xsam_qwen3_1x7b_instruct_instruct_siglip2_so400m_p14_384_sam_large_e1_gpu16_align_pretrain/pytorch_model.bin"
-)  # noqa: E501
+s1_pretrained_pth = None
+s2_pretrained_pth = None
 
 # Case2: Uncomment the following for evaluating from our pretrained model
 # s1_pretrained_pth = None
 # s2_pretrained_pth = None
 
 # Prompt
-prompt_template = PROMPT_TEMPLATE.qwen3_wothinking
-max_length = int(40960 - (384 / 14) ** 2 - 1024)
+prompt_template = PROMPT_TEMPLATE.phi3_chat
+max_length = int(4096 - (384 / 14) ** 2 - 1024)
 
 # Scheduler & Optimizer
 batch_size = 4  # per_device
@@ -184,13 +183,13 @@ tokenizer = dict(
 )
 
 image_processor = dict(
-    type=SiglipProcessor.from_pretrained,
+    type=SiglipImageProcessor.from_pretrained,
     pretrained_model_name_or_path=visual_encoder_name_or_path,
     trust_remote_code=True,
 )
 
 extra_image_processor = dict(
-    type=SamImageProcessor.from_pretrained,
+    type=Sam2ImageProcessor.from_pretrained,
     pretrained_model_name_or_path=seg_encoder_name_or_path,
     trust_remote_code=True,
     ignore_index=0,
@@ -203,9 +202,10 @@ model = dict(
     freeze_segmentor_encoder=False,
     use_dual_encoder=True,
     use_vision_sampler=True,
+    visual_select_layer=-3,
     connector_type="conv",
     cond_type=cond_type,
-    seg_select_layers=[6, 12, 18, 24],
+    seg_select_layers=[1, 2, 3],
     connector_hidden_dim=512,
     connector_scale_factor=[4, 2, 1, 0.5],
     sampler_input_feat="extra_pixel_values",
@@ -219,7 +219,7 @@ model = dict(
         pretrained_model_name_or_path=llm_name_or_path,
         trust_remote_code=False,
         torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
+        attn_implementation="eager",
     ),
     visual_encoder=dict(
         type=SiglipVisionModel.from_pretrained,
@@ -229,14 +229,14 @@ model = dict(
     segmentor=dict(
         type=XSegmentor,
         encoder=dict(
-            type=SamModel.from_pretrained,
+            type=Sam2Model.from_pretrained,
             pretrained_model_name_or_path=seg_encoder_name_or_path,
-            trust_remote_code=True,
             torch_dtype=torch.bfloat16,
             attn_implementation="eager",
         ),
         decoder=dict(
-            type=Mask2FormerModel._from_config,
+            type=Mask2FormerModel.from_pretrained,
+            pretrained_model_name_or_path=seg_decoder_name_or_path,
             config=dict(
                 type=Mask2FormerConfig.from_pretrained,
                 pretrained_model_name_or_path=seg_decoder_name_or_path,
@@ -245,10 +245,11 @@ model = dict(
                 num_feature_levels=3,
                 trust_remote_code=True,
             ),
+            ignore_mismatched_sizes=True,
             torch_dtype=torch.bfloat16,
         ),
         torch_dtype=torch.bfloat16,
-        reinit_decoder=True,
+        reinit_decoder=False,
         open_cls=True,
     ),
 )
@@ -1528,12 +1529,8 @@ val_evaluators = [
     ),
 ]
 
+# Keep lazy-config parse safe: avoid parse-time copy/mutation on lazy objects.
 vis_datasets = val_datasets
-
-vis_datasets = deepcopy(val_datasets)
-for dataset in vis_datasets:
-    if dataset["task_name"] in ["genseg", "ovseg", "vgdseg", "intseg"]:
-        dataset["postprocess_fn"]["threshold"] = 0.5  # type: ignore
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #

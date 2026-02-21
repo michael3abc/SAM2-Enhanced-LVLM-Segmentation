@@ -5,7 +5,7 @@ import torch
 from mmengine.hooks import CheckpointHook, DistSamplerSeedHook, IterTimerHook, LoggerHook, ParamSchedulerHook
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from torch.optim import AdamW
-from transformers import AutoModelForCausalLM, AutoTokenizer, SiglipProcessor, SiglipVisionModel
+from transformers import AutoModelForCausalLM, AutoTokenizer, SiglipImageProcessor, SiglipVisionModel
 from xtuner.utils import PROMPT_TEMPLATE
 
 from xsam.dataset import (
@@ -68,7 +68,7 @@ from xsam.utils.visualize import Visualizer
 code_dir = getenv("CODE_DIR", "./xsam/")
 data_dir = getenv("DATA_DIR", "./datas/")
 init_dir = getenv("INIT_DIR", "./inits/")
-work_dir = getenv("WORK_DIR", "./wkdrs/")
+work_dir = getenv("WORK_DIR", "./runs/")
 
 # Model
 llm_name_or_path = init_dir + "Phi-3-mini-4k-instruct"
@@ -78,11 +78,8 @@ seg_decoder_name_or_path = init_dir + "mask2former-swin-large-coco-panoptic"
 
 # Specify the pretrained pth
 # Case1: Uncomment the following for training from scratch
-s1_pretrained_pth = work_dir + "s1_seg_finetune/xsam_sam_large_m2f_e36_gpu16_seg_finetune/pytorch_model.bin"
-s2_pretrained_pth = (
-    work_dir
-    + "s2_align_pretrain/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_e1_gpu16_align_pretrain/pytorch_model.bin"
-)  # noqa: E501
+s1_pretrained_pth = None
+s2_pretrained_pth = None
 
 # Case2: Uncomment the following for evaluating from our pretrained model
 # s1_pretrained_pth = None
@@ -184,7 +181,7 @@ tokenizer = dict(
 )
 
 image_processor = dict(
-    type=SiglipProcessor.from_pretrained,
+    type=SiglipImageProcessor.from_pretrained,
     pretrained_model_name_or_path=visual_encoder_name_or_path,
     trust_remote_code=True,
 )
@@ -219,7 +216,7 @@ model = dict(
         pretrained_model_name_or_path=llm_name_or_path,
         trust_remote_code=False,
         torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
+        attn_implementation="eager",
     ),
     visual_encoder=dict(
         type=SiglipVisionModel.from_pretrained,

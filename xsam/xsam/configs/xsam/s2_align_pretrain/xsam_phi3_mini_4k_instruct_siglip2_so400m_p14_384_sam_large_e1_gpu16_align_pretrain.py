@@ -25,7 +25,7 @@ from xsam.model.segmentors.sam import SamModel
 code_dir = getenv("CODE_DIR", "./xsam/")
 data_dir = getenv("DATA_DIR", "./datas/")
 init_dir = getenv("INIT_DIR", "./inits/")
-work_dir = getenv("WORK_DIR", "./wkdrs/")
+work_dir = getenv("WORK_DIR", "./runs/")
 
 # Model
 llm_name_or_path = init_dir + "Phi-3-mini-4k-instruct"
@@ -268,3 +268,5 @@ log_processor = dict(
     window_size=1,
     mean_pattern=r".*(loss|time|data_time|grad_norm|tflops).*",
 )
+
+

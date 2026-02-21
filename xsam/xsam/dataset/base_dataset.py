@@ -1,5 +1,6 @@
 import copy
 import os
+import random
 
 import torch
 from mmengine.config import Config, ConfigDict
@@ -77,6 +78,9 @@ class BaseDataset(Dataset):
         self.cond_type = cond_type
         self.repeats_scale = repeats_scale
         self.repeats = 1.0
+        self.train_ratio = float(kwargs.get("train_ratio", 1.0))
+        if not 0.0 <= self.train_ratio <= 1.0:
+            raise ValueError(f"train_ratio must be in [0, 1], but got {self.train_ratio}.")
 
         if isinstance(tokenizer, dict) or isinstance(tokenizer, Config) or isinstance(tokenizer, ConfigDict):
             tokenizer = BUILDER.build(tokenizer)
@@ -255,6 +259,25 @@ class BaseDataset(Dataset):
 
     def load_ann_data(self):
         data = self._load_ann_data()
+        if self.data_mode == "train" and self.train_ratio < 1.0:
+            total_len = len(data)
+            sampled_len = int(total_len * self.train_ratio)
+            if self.train_ratio > 0 and total_len > 0:
+                sampled_len = max(1, sampled_len)
+            sampled_len = min(sampled_len, total_len)
+            if sampled_len < total_len:
+                rng = random.Random(1024)
+                sampled_indices = sorted(rng.sample(range(total_len), sampled_len))
+                if hasattr(data, "select"):
+                    data = data.select(sampled_indices)
+                else:
+                    if not isinstance(data, list):
+                        data = list(data)
+                    data = [data[i] for i in sampled_indices]
+                print_log(
+                    f"Apply train_ratio={self.train_ratio:.4f} on {self.data_name}: {sampled_len}/{total_len}",
+                    logger="current",
+                )
         if debug_mode:
             data = data[:debug_iter] + data[-debug_iter:]
         self.data_length = len(data)

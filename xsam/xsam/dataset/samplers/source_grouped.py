@@ -28,7 +28,8 @@ def get_source_grouped_indices(lengths, group_batch_size, round_up=True, seed=No
         torch.manual_seed(seed)
         random.seed(seed)
 
-    assert all(length != 0 for length in lengths), "Should not have zero length."
+    if not any(length > 0 for length in lengths):
+        raise AssertionError("All sources have zero length.")
 
     # Create indices for each source
     start_inds = [0] + np.cumsum(lengths).tolist()[:-1]

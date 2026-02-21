@@ -23,7 +23,7 @@ from vlmeval.smp import *
 from vlmeval.vlm.base import BaseModel
 from xtuner.utils import StopWordStoppingCriteria
 
-from xsam.dataset.processors import SamImageProcessor
+from xsam.dataset.processors import Sam2ImageProcessor, SamImageProcessor
 from xsam.model.segmentors.sam import SamModel
 from xsam.utils.logging import print_log
 from xsam.utils.template import PROMPT_TEMPLATE
@@ -113,6 +113,10 @@ class XSam_XTuner(BaseModel):
         if segmentor_path is not None and "sam" in segmentor_path:
             segmentor = SamModel.from_pretrained(segmentor_path, torch_dtype=torch_dtype, device_map="cpu")
             segmentor_encoder = segmentor.vision_encoder
+        # Use SAM2 processor if the encoder path looks like SAM2.
+        if "sam2" in segmentor_path.lower():
+            extra_image_processor = Sam2ImageProcessor.from_pretrained(segmentor_path)
+        else:
             extra_image_processor = SamImageProcessor.from_pretrained(segmentor_path)
             print_log(f"Load segmentor from {segmentor_path}", logger="current")
         elif segmentor_encoder_path is not None:
@@ -120,6 +124,9 @@ class XSam_XTuner(BaseModel):
                 segmentor_encoder_path, torch_dtype=torch_dtype, device_map="cpu"
             )
             segmentor_encoder = segmentor_encoder.vision_encoder
+        if "sam2" in segmentor_encoder_path.lower():
+            extra_image_processor = Sam2ImageProcessor.from_pretrained(segmentor_encoder_path)
+        else:
             extra_image_processor = SamImageProcessor.from_pretrained(segmentor_encoder_path)
             print_log(f"Load segmentor_encoder from {segmentor_encoder_path}", logger="current")
         else:
