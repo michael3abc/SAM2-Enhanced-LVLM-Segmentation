@@ -3,7 +3,10 @@
 ## Dataset Structure
 
 ```
-datas
+data
+├── coco
+│   ├── coco2014 # file
+│   └── coco2017 # file
 ├── gcgseg_data
 │   └── grand_f
 │       ├── annotations
@@ -76,8 +79,8 @@ datas
 ### 1. Generic Segmentation Dataset
 ```bash
 cd $root_dir
-mkdir -p datas/genseg_data/coco2017
-export temp_data_dir=$root_dir/datas/genseg_data
+mkdir -p data/genseg_data/coco2017
+export temp_data_dir=$root_dir/data/genseg_data
 # download coco2017 dataset
 wget http://images.cocodataset.org/zips/train2017.zip -O $temp_data_dir/coco2017/train2017.zip
 wget http://images.cocodataset.org/zips/val2017.zip -O $temp_data_dir/coco2017/val2017.zip
@@ -94,7 +97,7 @@ unzip $temp_data_dir/coco2017/annotations/panoptic_val2017.zip -d $temp_data_dir
 rm $temp_data_dir/coco2017/train2017.zip $temp_data_dir/coco2017/val2017.zip $temp_data_dir/coco2017/annotations_trainval2017.zip $temp_data_dir/coco2017/panoptic_annotations_trainval2017.zip $temp_data_dir/coco2017/annotations/panoptic_train2017.zip $temp_data_dir/coco2017/annotations/panoptic_val2017.zip
 
 # download coco2014 images
-mkdir -p datas/genseg_data/coco2014
+mkdir -p data/genseg_data/coco2014
 wget http://images.cocodataset.org/zips/train2014.zip -O $temp_data_dir/coco2014/train2014.zip
 wget http://images.cocodataset.org/zips/val2014.zip -O $temp_data_dir/coco2014/val2014.zip
 # unzip dataset
@@ -108,8 +111,8 @@ unset temp_data_dir
 ### 2. Open-Vocabulary(OV) Segmentation Dataset
 ```bash
 cd $root_dir
-mkdir -p datas/ovseg_data
-export temp_data_dir=$root_dir/datas/ovseg_data
+mkdir -p data/ovseg_data
+export temp_data_dir=$root_dir/data/ovseg_data
 # download dataset
 wget http://data.csail.mit.edu/places/ADEchallenge/ADEChallengeData2016.zip -O $temp_data_dir/ADEChallengeData2016.zip
 # unzip dataset and rename the folder
@@ -128,9 +131,9 @@ unset temp_data_dir
 ### 3. Referring Segmentation Dataset
 ```bash
 cd $root_dir
-mkdir -p datas/refseg_data
-mkdir -p datas/refseg_data/images
-export temp_data_dir=$root_dir/datas/refseg_data
+mkdir -p data/refseg_data
+mkdir -p data/refseg_data/images
+export temp_data_dir=$root_dir/data/refseg_data
 # download dataset
 wget https://web.archive.org/web/20220413011718/https://bvisionweb1.cs.unc.edu/licheng/referit/data/refcoco.zip -O $temp_data_dir/refcoco.zip
 wget https://web.archive.org/web/20220413011656/https://bvisionweb1.cs.unc.edu/licheng/referit/data/refcoco+.zip -O $temp_data_dir/refcoco+.zip
@@ -144,17 +147,17 @@ rm $temp_data_dir/refclef.zip $temp_data_dir/refcoco.zip $temp_data_dir/refcoco+
 unset temp_data_dir
 
 # softlink coco2014 images
-ln -s $root_dir/datas/genseg_data/coco2014 $temp_data_dir/images/coco2014
+ln -s $root_dir/data/genseg_data/coco2014 $temp_data_dir/images/coco2014
 
 unset temp_data_dir
 ```
 
 ### 4. Reasoning Segmentation Dataset
-Download the [Dataset](https://drive.google.com/drive/folders/125mewyg5Ao6tZ3ZdJ-1-E3n04LGVELqy) (train.zip, val.zip, test.zip, explanatory/train.json) from Google Drive and put it in $root_dir/datas/reaseg_data/lisa.
+Download the [Dataset](https://drive.google.com/drive/folders/125mewyg5Ao6tZ3ZdJ-1-E3n04LGVELqy) (train.zip, val.zip, test.zip, explanatory/train.json) from Google Drive and put it in $root_dir/data/reaseg_data/lisa.
 ```bash
 cd $root_dir
-mkdir -p datas/reaseg_data/lisa
-export temp_data_dir=$root_dir/datas/reaseg_data/lisa
+mkdir -p data/reaseg_data/lisa
+export temp_data_dir=$root_dir/data/reaseg_data/lisa
 mkdir -p $temp_data_dir/explanatory
 # suppose you have downloaded the dataset and put them in $temp_data_dir as below structure
 # reaseg_data
@@ -176,11 +179,11 @@ unset temp_data_dir
 ```
 
 ### 5. GCG Segmentation Dataset
-Download the [Dataset](https://drive.usercontent.google.com/download?id=1abdxVhrbNQhjJQ8eAcuPrOUBzhGaFsF_&export=download&authuser=0&confirm=t&uuid=bb3fe3db-b08c-48f0-9280-2e56c0910987&at=AN8xHooqlXNOUCiIJYVHFMBLtmVn%3A1754293785835)(GranDf_HA_images.zip) from Google Drive and put it in $root_dir/datas/gcgseg_data.
+Download the [Dataset](https://drive.usercontent.google.com/download?id=1abdxVhrbNQhjJQ8eAcuPrOUBzhGaFsF_&export=download&authuser=0&confirm=t&uuid=bb3fe3db-b08c-48f0-9280-2e56c0910987&at=AN8xHooqlXNOUCiIJYVHFMBLtmVn%3A1754293785835)(GranDf_HA_images.zip) from Google Drive and put it in $root_dir/data/gcgseg_data.
 ```bash
 cd $root_dir
-mkdir -p datas/gcgseg_data datas/gcgseg_data/grand_f/images
-export temp_data_dir=$root_dir/datas/gcgseg_data
+mkdir -p data/gcgseg_data data/gcgseg_data/grand_f/images
+export temp_data_dir=$root_dir/data/gcgseg_data
 # download dataset
 hfd MBZUAI/GranD-f --tools aria2c -x 8 --save_dir $temp_data_dir --dataset
 mv GranD-f $temp_data_dir/annotations
@@ -195,18 +198,18 @@ mv $temp_data_dir/images/flickr30k-images $temp_data_dir/images/flickr30k
 rm $temp_data_dir/flickr30k-images.zip
 
 # softlink coco2017 and coco2014 images
-ln -s $root_dir/datas/genseg_data/coco2017 $temp_data_dir/images/coco2017
-ln -s $root_dir/datas/refseg_data/coco2014 $temp_data_dir/images/coco2014
+ln -s $root_dir/data/genseg_data/coco2017 $temp_data_dir/images/coco2017
+ln -s $root_dir/data/refseg_data/coco2014 $temp_data_dir/images/coco2014
 
 unset temp_data_dir
 ```
 
 ### 6. Interactive Segmentation Dataset
-Download the [Dataset](https://drive.usercontent.google.com/download?id=1EcC1tl1OQRgIqqy7KFG7JZz2KHujAQB3&export=download&authuser=0) (PSALM_data.zip) from Google Drive and put it in $root_dir/datas/intseg_data/coco_int.
+Download the [Dataset](https://drive.usercontent.google.com/download?id=1EcC1tl1OQRgIqqy7KFG7JZz2KHujAQB3&export=download&authuser=0) (PSALM_data.zip) from Google Drive and put it in $root_dir/data/intseg_data/coco_int.
 ```bash
 cd $root_dir
-mkdir -p datas/intseg_data datas/intseg_data/coco_int/annotations
-export temp_data_dir=$root_dir/datas/intseg_data/coco_int
+mkdir -p data/intseg_data data/intseg_data/coco_int/annotations
+export temp_data_dir=$root_dir/data/intseg_data/coco_int
 # suppose you have downloaded the dataset and put them in $temp_data_dir as below structure
 # intseg_data
 # └── coco_int
@@ -219,18 +222,18 @@ export temp_data_dir=$root_dir/datas/intseg_data/coco_int
 # unzip dataset
 unzip $temp_data_dir/PSALM_data.zip -d $temp_data_dir
 mv $temp_data_dir/PSALM_data/coco_interactive_train_psalm.json $temp_data_dir/PSALM_data/coco_interactive_val_psalm.json $temp_data_dir/annotations
-ln -s $root_dir/datas/genseg_data/coco2017 $temp_data_dir/coco2017
+ln -s $root_dir/data/genseg_data/coco2017 $temp_data_dir/coco2017
 rm -rf $temp_data_dir/PSALM_data $temp_data_dir/PSALM_data.zip
 
 unset temp_data_dir
 ```
 
 ### 7. VGD Segmentation Dataset
-Download the [Dataset](https://huggingface.co/hao9610/X-SAM/tree/main/vgdseg_annotations) (vgdseg_annotations) from HuggingFace and put it in $root_dir/datas/vgdseg_data/coco_vgd.
+Download the [Dataset](https://huggingface.co/hao9610/X-SAM/tree/main/vgdseg_annotations) (vgdseg_annotations) from HuggingFace and put it in $root_dir/data/vgdseg_data/coco_vgd.
 ```bash
 cd $root_dir
-mkdir -p datas/vgdseg_data/coco_vgd
-export temp_data_dir=$root_dir/datas/vgdseg_data/coco_vgd
+mkdir -p data/vgdseg_data/coco_vgd
+export temp_data_dir=$root_dir/data/vgdseg_data/coco_vgd
 mkdir -p $temp_data_dir/images
 # suppose you have downloaded the dataset and put them in $temp_data_dir as below structure
 # vgdseg_data
@@ -243,7 +246,7 @@ mkdir -p $temp_data_dir/images
 # unzip dataset
 unzip $temp_data_dir/vgd_seg_annotations.zip -d $temp_data_dir
 mv $temp_data_dir/vgd_annotations $temp_data_dir/annotations
-ln -s $root_dir/datas/genseg_data/coco2017 $temp_data_dir/coco2017
+ln -s $root_dir/data/genseg_data/coco2017 $temp_data_dir/coco2017
 rm $temp_data_dir/vgd_seg_annotations.zip
 
 unset temp_data_dir
@@ -254,14 +257,14 @@ We provide an awesome [script](hfd.sh) to download datasets, thanks to [hfd](htt
 ### 1. LLaVA Training Dataset
 ```bash
 cd $root_dir
-mkdir -p datas/imgconv_data/llava
-export temp_data_dir=$root_dir/datas/imgconv_data/llava
+mkdir -p data/imgconv_data/llava
+export temp_data_dir=$root_dir/data/imgconv_data/llava
 chmod +x hfd.sh
 alias hfd="$PWD/hfd.sh"
 
 hfd liuhaotian/LLaVA-Instruct-150K --tools aria2c -x 8 --save_dir $temp_data_dir --dataset
 hfd liuhaotian/LLaVA-Pretrain --tools aria2c -x 8 --save_dir $temp_data_dir --dataset
-ln -s $root_dir/datas/genseg_data/coco2017 $temp_data_dir/coco
+ln -s $root_dir/data/genseg_data/coco2017 $temp_data_dir/coco
 mkdir $temp_data_dir/llava_images
 # please prepare the GQA, OCR_VQA, TEXT_VQA, VG datasets and put them in $temp_data_dir as below structure
 # llava_images
@@ -276,7 +279,7 @@ unset temp_data_dir
 
 ### 2. VLM Evaluation Dataset
 ```bash
-data_dir=$root_dir/datas
+data_dir=$root_dir/data
 export LMUData="$data_dir/LMUData"
 mkdir -p $LMUData
 

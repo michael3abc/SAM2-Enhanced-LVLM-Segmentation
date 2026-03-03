@@ -20,7 +20,7 @@ from xsam.model import LLaVAModel
 #######################################################################
 # Directories
 code_dir = getenv("CODE_DIR", "./xsam/")
-data_dir = getenv("DATA_DIR", "./datas/")
+data_dir = getenv("DATA_DIR", "./data/")
 init_dir = getenv("INIT_DIR", "./inits/")
 
 # Model

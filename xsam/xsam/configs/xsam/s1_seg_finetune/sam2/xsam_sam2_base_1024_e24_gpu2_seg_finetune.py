@@ -36,13 +36,14 @@ data_root = data_dir + "genseg_data/"
 data_path = data_root + "coco2017/annotations/panoptic_train2017.json"
 image_folder = data_root + "coco2017/train2017"
 panseg_map_folder = data_root + "coco2017/panoptic_train2017"
-image_size = int(768)
+image_size = int(1024)
 
 # Scheduler & Optimizer
-batch_size = 2  # per_device
-accumulative_counts = 32
-dataloader_num_workers = 8
-max_epochs = 3
+# Keep global batch close to gpu1 config when using 2 GPUs.
+batch_size = 16  # per_device
+accumulative_counts = 2
+dataloader_num_workers = 6
+max_epochs = 24
 optim_type = AdamW
 lr = 1e-4
 betas = (0.9, 0.999)
@@ -51,7 +52,7 @@ max_norm = 0.01  # grad clip
 warmup_ratio = 0.03
 
 # Save
-save_steps = 2000
+save_steps = 5000
 save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Logging
@@ -70,7 +71,7 @@ extra_image_processor = dict(
 model = dict(
     type=XSamModel,
     freeze_segmentor_encoder=False,
-    use_activation_checkpointing=False,
+    use_activation_checkpointing=True,
     s1_pretrained_pth=s1_pretrained_pth,
     postprocess_fn=genseg_postprocess_fn,
     connector_type=None,
@@ -131,9 +132,9 @@ pannoptic_genseg_dataset = dict(
 train_dataloader = dict(
     batch_size=batch_size,
     num_workers=dataloader_num_workers,
-    persistent_workers=True,
-    prefetch_factor=4,
-    pin_memory=True,
+    persistent_workers=False,
+    prefetch_factor=2,
+    pin_memory=False,
     dataset=pannoptic_genseg_dataset,
     sampler=dict(
         type=LengthGroupedSampler,
@@ -310,9 +311,12 @@ log_processor = dict(
     mean_pattern=r".*(loss|time|data_time|grad_norm|tflops).*",
 )
 
-find_unused_parameters = True
+find_unused_parameters = False
 
 """
-bash run.sh --modes train \
-  --config xsam/xsam/configs/xsam/s1_seg_finetune/sam2/xsam_sam2_base_768_e3_gpu1_seg_finetune.py
+
+CUDA_VISIBLE_DEVICES=0,1 GPU_PER_NODE=2 \
+bash ./run.sh --modes train \
+  --config xsam/xsam/configs/xsam/s1_seg_finetune/sam2/xsam_sam2_base_1024_e24_gpu2_seg_finetune.py
+
 """

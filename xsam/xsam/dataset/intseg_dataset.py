@@ -21,6 +21,78 @@ class IntSegDataset(VGDSegDataset):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+    def _normalize_loaded_ann_data(self, loaded_data):
+        """Normalize loaded annotations to canonical intseg format.
+
+        Args:
+            loaded_data (list[dict]): Loaded json list from `data_path`.
+        Returns:
+            tuple[list[dict], bool]: Normalized samples and whether conversion happened.
+        """
+        if not isinstance(loaded_data, list) or len(loaded_data) == 0:
+            return loaded_data, False
+
+        # Canonical cache format already has these keys.
+        canonical_keys = {"image_file", "image_id", "image_size", "annotations"}
+        if canonical_keys.issubset(set(loaded_data[0].keys())):
+            return loaded_data, False
+
+        # Raw intseg annotation format has `image` + `image_info` + `anns`.
+        raw_keys = {"image", "image_info", "anns"}
+        if not raw_keys.issubset(set(loaded_data[0].keys())):
+            return loaded_data, False
+
+        normalized = []
+        for data in loaded_data:
+            image_info = data.get("image_info", {})
+            height, width = image_info.get("height"), image_info.get("width")
+            if height is None or width is None:
+                self.woann_cnt += 1
+                continue
+
+            image_id = image_info.get("id", data.get("new_img_id", data.get("image_id", -1)))
+            image_file = data.get("image", image_info.get("file_name"))
+            cur_anns = []
+
+            for ann in data.get("anns", []):
+                visual_prompts = self._process_visual_prompts(ann, height, width)
+                if len(visual_prompts) == 0:
+                    continue
+
+                cur_anns.append(
+                    {
+                        "id": ann["id"],
+                        "image_id": ann.get("image_id", image_id),
+                        "category_id": ann["category_id"],
+                        "visual_prompts": visual_prompts,
+                        "bbox": ann["bbox"],
+                        "bbox_mode": BoxMode.XYWH_ABS,
+                        "iscrowd": ann.get("iscrowd", 0),
+                        "segmentation": encode_mask(decode_mask(ann["segmentation"], height, width)),
+                    }
+                )
+
+            if len(cur_anns) == 0:
+                self.woann_cnt += 1
+                continue
+
+            normalized.append(
+                {
+                    "image_file": image_file,
+                    "image_id": image_id,
+                    "image_size": (height, width),
+                    "annotations": cur_anns,
+                    "image_info": {
+                        "file_name": image_info.get("file_name", image_file),
+                        "height": height,
+                        "width": width,
+                        "image_id": image_id,
+                    },
+                }
+            )
+
+        return normalized, True
+
     def _process_visual_prompts(self, ann, height, width):
         visual_prompt_keys = [
             "point_visual_prompt_mask",
@@ -131,6 +203,12 @@ class IntSegDataset(VGDSegDataset):
         if osp.exists(self.data_path):
             with open(self.data_path, "r") as f:
                 _rets = json.load(f)
+            _rets, is_converted = self._normalize_loaded_ann_data(_rets)
+            if is_converted:
+                print_log(
+                    f"Detected raw intseg cache format at {self.data_path}; converted in-memory to canonical format.",
+                    logger="current",
+                )
         else:
             with open(self.source_data_path, "r", encoding="utf-8", errors="ignore") as f:
                 json_data = json.load(f)

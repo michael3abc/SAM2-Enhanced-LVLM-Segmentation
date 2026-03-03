@@ -21,7 +21,7 @@ from xsam.model.segmentors.sam2 import Sam2Model
 #######################################################################
 # Directories
 code_dir = __import__("os").environ.get("CODE_DIR", "./xsam/")
-data_dir = __import__("os").environ.get("DATA_DIR", "./datas/")
+data_dir = __import__("os").environ.get("DATA_DIR", "./data/")
 init_dir = __import__("os").environ.get("INIT_DIR", "./inits/")
 work_dir = __import__("os").environ.get("WORK_DIR", "./runs/")
 

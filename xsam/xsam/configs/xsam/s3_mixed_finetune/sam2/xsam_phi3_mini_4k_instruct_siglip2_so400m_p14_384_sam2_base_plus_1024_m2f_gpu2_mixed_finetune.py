@@ -1,12 +1,22 @@
-from copy import deepcopy
-from os import getenv
 
 import torch
-from mmengine.hooks import CheckpointHook, DistSamplerSeedHook, IterTimerHook, LoggerHook, ParamSchedulerHook
+from mmengine.hooks import (
+    CheckpointHook,
+    DistSamplerSeedHook,
+    IterTimerHook,
+    LoggerHook,
+    ParamSchedulerHook,
+)
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
+from peft import LoraConfig
 from torch.optim import AdamW
-from transformers import AutoModelForCausalLM, AutoTokenizer, SiglipProcessor, SiglipVisionModel
-
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    SiglipImageProcessor,
+    SiglipVisionModel,
+)
 from xsam.dataset import (
     ConcatDataset,
     GCGSegDataset,
@@ -41,9 +51,14 @@ from xsam.dataset.process_fns import (
     refseg_postprocess_fn,
     vgdseg_postprocess_fn,
 )
-from xsam.dataset.processors import SamImageProcessor
+from xsam.dataset.processors import Sam2ImageProcessor
 from xsam.dataset.samplers import SourceGroupedSampler
-from xsam.engine.hooks import DatasetInfoHook, EvaluateChatHook, ModelInfoHook, PTCheckpointHook
+from xsam.engine.hooks import (
+    DatasetInfoHook,
+    EvaluateChatHook,
+    ModelInfoHook,
+    PTCheckpointHook,
+)
 from xsam.engine.runner import TrainLoop
 from xsam.evaluation.evaluators import (
     GCGSegEvaluator,
@@ -57,46 +72,71 @@ from xsam.evaluation.evaluators import (
 from xsam.model import XSamModel
 from xsam.model.segmentors import XSegmentor
 from xsam.model.segmentors.mask2former import Mask2FormerConfig, Mask2FormerModel
-from xsam.model.segmentors.sam import SamModel
-from xsam.utils.template import PROMPT_TEMPLATE
+from xsam.model.segmentors.sam2 import Sam2Model
 from xsam.utils.visualize import Visualizer
+from xtuner.utils import PROMPT_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Directories
-code_dir = getenv("CODE_DIR", "./xsam/")
-data_dir = getenv("DATA_DIR", "./datas/")
-init_dir = getenv("INIT_DIR", "./inits/")
-work_dir = getenv("WORK_DIR", "./runs/")
+# NOTE:
+# mmengine lazy config does not allow calling imported functions (e.g. getenv) at parse time.
+# Keep deterministic defaults here and override via `--cfg-options` when needed.
+code_dir = __import__("os").environ.get("CODE_DIR", "./xsam/")
+data_dir = __import__("os").environ.get("DATA_DIR", "./data/")
+init_dir = __import__("os").environ.get("INIT_DIR", "./inits/")
+work_dir = __import__("os").environ.get("WORK_DIR", "./runs/")
+root_dir = __import__("os").environ.get("ROOT_DIR", "./")
+root_dir = root_dir if root_dir.endswith("/") else root_dir + "/"
+_cfg_dir = __import__("os").path.dirname(__import__("os").path.abspath(__file__))
+_image_dir_candidates = [
+    __import__("os").path.normpath(__import__("os").path.join(_cfg_dir, "..", "images")),
+    __import__("os").path.normpath(__import__("os").path.join(root_dir, "xsam/xsam/configs/xsam/images")),
+    __import__("os").path.normpath(__import__("os").path.join(root_dir, "xsam/configs/xsam/images")),
+    __import__("os").path.normpath(__import__("os").path.join(code_dir, "xsam/configs/xsam/images")),
+    __import__("os").path.normpath(__import__("os").path.join(code_dir, "configs/xsam/images")),
+]
+images_dir = None
+for _p in _image_dir_candidates:
+    if __import__("os").path.exists(_p):
+        images_dir = _p.rstrip("/") + "/"
+        break
+if images_dir is None:
+    images_dir = _image_dir_candidates[0].rstrip("/") + "/"
 
 # Model
-llm_name_or_path = init_dir + "vicuna-7b-v1.5"
+llm_name_or_path = init_dir + "extracted_weights/lvlm/xsam_siglip2_hf"
 visual_encoder_name_or_path = init_dir + "siglip2-so400m-patch14-384"
-seg_encoder_name_or_path = init_dir + "sam-vit-large"
+seg_encoder_name_or_path = init_dir + "sam2.1-hiera-base-plus"
 seg_decoder_name_or_path = init_dir + "mask2former-swin-large-coco-panoptic"
 
-# Specify the pretrained pth
-# Case1: Uncomment the following for training from scratch
-s1_pretrained_pth = work_dir + "s1_seg_finetune/xsam_sam_large_m2f_e36_gpu16_seg_finetune/pytorch_model.bin"
-s2_pretrained_pth = (
+# Stage3 init from custom SAM2 pipeline:
+# 1) Segmentor encoder + decoder(+pixel decoder/bridge...): your S1
+s1_pretrained_pth = work_dir + "s1_seg_finetune/xsam_sam2_base_1024_e3_gpu1_seg_finetune_v1/pytorch_model.bin"
+# 2) Visual encoder: author extracted img encoder
+visual_encoder_pretrained_pth = init_dir + "extracted_weights/img_encoder/xsam_img_encoder.bin"
+# 3) visual_projector / seg_projector: your S2 1024_v2
+projector_pretrained_pth = (
     work_dir
-    + "s2_align_pretrain/xsam_vicuna_7b_v1x5_instruct_siglip2_so400m_p14_384_sam_large_e1_gpu16_align_pretrain/pytorch_model.bin"
-)  # noqa: E501
-
-# Case2: Uncomment the following for evaluating from our pretrained model
-# s1_pretrained_pth = None
-# s2_pretrained_pth = None
+    + "s2_align_pretrain/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_e1_gpu1_align_pretrain_1024_v2/pytorch_model.bin"
+)
+# 4) llm_projector: extracted from author S3
+llm_projector_pretrained_pth = init_dir + "extracted_weights/projectors/llm_projector/xsam_s3_llm_projectors.bin"
+# Disable merged init and load module weights separately.
+s2_pretrained_pth = None
 
 # Prompt
-prompt_template = PROMPT_TEMPLATE.vicuna
-max_length = int(40960 - (384 / 14) ** 2 - 1024)
+prompt_template = PROMPT_TEMPLATE.phi3_chat
+max_length = int(4096 - (384 / 14) ** 2 - 1024)
 
 # Scheduler & Optimizer
-batch_size = 4  # per_device
-accumulative_counts = 1
-dataloader_num_workers = 4
-max_epochs = 1
+batch_size = 4  # per_device (2 GPUs)
+# keep effective global batch close to gpu1 config:
+# global_batch ~= batch_size * accumulative_counts * world_size
+accumulative_counts = 16
+dataloader_num_workers = 8
+max_epochs = 0.25
 optim_type = AdamW
 lr = 4e-5
 betas = (0.9, 0.999)
@@ -104,8 +144,22 @@ weight_decay = 0.05
 max_norm = 1  # grad clip
 warmup_ratio = 0.03
 
+# LoRA (LLM only)
+llm_lora_rank = 64
+llm_lora_alpha = 128
+llm_lora_dropout = 0.05
+
+# QLoRA: 4-bit quantized base LLM + LoRA adapters
+llm_quantization_config = dict(
+    type=BitsAndBytesConfig,
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_compute_dtype=torch.bfloat16,
+)
+
 # Save
-save_steps = 2000
+save_steps = 500
 save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Logging
@@ -115,20 +169,20 @@ logging_interval = 10
 evaluation_freq = 2000
 SYSTEM = ""
 evaluation_images = [
-    code_dir + "xsam/configs/xsam/images/imgconv.jpg",
-    code_dir + "xsam/configs/xsam/images/genseg.jpg",
-    code_dir + "xsam/configs/xsam/images/refseg.jpg",
-    code_dir + "xsam/configs/xsam/images/reaseg.jpg",
-    code_dir + "xsam/configs/xsam/images/gcgseg.jpg",
-    code_dir + "xsam/configs/xsam/images/intseg.jpg",
-    code_dir + "xsam/configs/xsam/images/intseg.jpg",
-    code_dir + "xsam/configs/xsam/images/intseg.jpg",
-    code_dir + "xsam/configs/xsam/images/intseg.jpg",
-    code_dir + "xsam/configs/xsam/images/vgdseg.jpg",
-    code_dir + "xsam/configs/xsam/images/vgdseg.jpg",
-    code_dir + "xsam/configs/xsam/images/vgdseg.jpg",
-    code_dir + "xsam/configs/xsam/images/vgdseg.jpg",
-    code_dir + "xsam/configs/xsam/images/vgdseg.jpg",
+    images_dir + "imgconv.jpg",
+    images_dir + "genseg.jpg",
+    images_dir + "refseg.jpg",
+    images_dir + "reaseg.jpg",
+    images_dir + "gcgseg.jpg",
+    images_dir + "intseg.jpg",
+    images_dir + "intseg.jpg",
+    images_dir + "intseg.jpg",
+    images_dir + "intseg.jpg",
+    images_dir + "vgdseg.jpg",
+    images_dir + "vgdseg.jpg",
+    images_dir + "vgdseg.jpg",
+    images_dir + "vgdseg.jpg",
+    images_dir + "vgdseg.jpg",
 ]
 evaluation_inputs = [
     "Can you describe this image in detail? Please elaborate in your response.",
@@ -152,20 +206,20 @@ vprompt_masks = [
     (None,),
     (None,),
     (None,),
-    (code_dir + "xsam/configs/xsam/images/vprompt_masks/intseg_point0.png",),
-    (code_dir + "xsam/configs/xsam/images/vprompt_masks/intseg_scribble1.png",),
-    (code_dir + "xsam/configs/xsam/images/vprompt_masks/intseg_box0.png",),
-    (code_dir + "xsam/configs/xsam/images/vprompt_masks/intseg_mask1.png",),
-    (code_dir + "xsam/configs/xsam/images/vprompt_masks/vgdseg_point0.png",),
-    (code_dir + "xsam/configs/xsam/images/vprompt_masks/vgdseg_scribble1.png",),
-    (code_dir + "xsam/configs/xsam/images/vprompt_masks/vgdseg_box0.png",),
+    (images_dir + "vprompt_masks/intseg_point0.png",),
+    (images_dir + "vprompt_masks/intseg_scribble1.png",),
+    (images_dir + "vprompt_masks/intseg_box0.png",),
+    (images_dir + "vprompt_masks/intseg_mask1.png",),
+    (images_dir + "vprompt_masks/vgdseg_point0.png",),
+    (images_dir + "vprompt_masks/vgdseg_scribble1.png",),
+    (images_dir + "vprompt_masks/vgdseg_box0.png",),
     (
-        code_dir + "xsam/configs/xsam/images/vprompt_masks/vgdseg_point0.png",
-        code_dir + "xsam/configs/xsam/images/vprompt_masks/vgdseg_scribble1.png",
+        images_dir + "vprompt_masks/vgdseg_point0.png",
+        images_dir + "vprompt_masks/vgdseg_scribble1.png",
     ),
     (
-        code_dir + "xsam/configs/xsam/images/vprompt_masks/vgdseg_box0.png",
-        code_dir + "xsam/configs/xsam/images/vprompt_masks/vgdseg_point1.png",
+        images_dir + "vprompt_masks/vgdseg_box0.png",
+        images_dir + "vprompt_masks/vgdseg_point1.png",
     ),
 ]
 
@@ -184,13 +238,14 @@ tokenizer = dict(
 )
 
 image_processor = dict(
-    type=SiglipProcessor.from_pretrained,
+    type=SiglipImageProcessor.from_pretrained,
     pretrained_model_name_or_path=visual_encoder_name_or_path,
     trust_remote_code=True,
 )
 
+# Use SAM2 processor when encoder is SAM2.
 extra_image_processor = dict(
-    type=SamImageProcessor.from_pretrained,
+    type=Sam2ImageProcessor.from_pretrained,
     pretrained_model_name_or_path=seg_encoder_name_or_path,
     trust_remote_code=True,
     ignore_index=0,
@@ -198,20 +253,33 @@ extra_image_processor = dict(
 
 model = dict(
     type=XSamModel,
-    freeze_llm=False,
+    freeze_llm=True,
     freeze_visual_encoder=False,
     freeze_segmentor_encoder=False,
+    llm_lora=dict(
+        type=LoraConfig,
+        task_type="CAUSAL_LM",
+        r=llm_lora_rank,
+        lora_alpha=llm_lora_alpha,
+        lora_dropout=llm_lora_dropout,
+        bias="none",
+        target_modules=None,
+    ),
     use_dual_encoder=True,
     use_vision_sampler=True,
-    connector_type="conv",
+    visual_select_layer=-3,
+    connector_type=None,
     cond_type=cond_type,
-    seg_select_layers=[6, 12, 18, 24],
+    seg_select_layers=[1, 2, 3],
     connector_hidden_dim=512,
     connector_scale_factor=[4, 2, 1, 0.5],
     sampler_input_feat="extra_pixel_values",
     special_tokens=special_tokens,
     s1_pretrained_pth=s1_pretrained_pth,
     s2_pretrained_pth=s2_pretrained_pth,
+    visual_encoder_pretrained_pth=visual_encoder_pretrained_pth,
+    projector_pretrained_pth=projector_pretrained_pth,
+    llm_projector_pretrained_pth=llm_projector_pretrained_pth,
     tokenizer=tokenizer,
     postprocess_fn=genseg_postprocess_fn,
     llm=dict(
@@ -219,6 +287,8 @@ model = dict(
         pretrained_model_name_or_path=llm_name_or_path,
         trust_remote_code=False,
         torch_dtype=torch.bfloat16,
+        quantization_config=llm_quantization_config,
+        low_cpu_mem_usage=True,
         attn_implementation="flash_attention_2",
     ),
     visual_encoder=dict(
@@ -229,14 +299,14 @@ model = dict(
     segmentor=dict(
         type=XSegmentor,
         encoder=dict(
-            type=SamModel.from_pretrained,
+            type=Sam2Model.from_pretrained,
             pretrained_model_name_or_path=seg_encoder_name_or_path,
-            trust_remote_code=True,
             torch_dtype=torch.bfloat16,
-            attn_implementation="eager",
+            attn_implementation="flash_attention_2",
         ),
         decoder=dict(
-            type=Mask2FormerModel._from_config,
+            type=Mask2FormerModel.from_pretrained,
+            pretrained_model_name_or_path=seg_decoder_name_or_path,
             config=dict(
                 type=Mask2FormerConfig.from_pretrained,
                 pretrained_model_name_or_path=seg_decoder_name_or_path,
@@ -245,10 +315,11 @@ model = dict(
                 num_feature_levels=3,
                 trust_remote_code=True,
             ),
+            ignore_mismatched_sizes=True,
             torch_dtype=torch.bfloat16,
         ),
         torch_dtype=torch.bfloat16,
-        reinit_decoder=True,
+        reinit_decoder=False,
         open_cls=True,
     ),
 )
@@ -265,9 +336,28 @@ gcgseg_data_root = data_dir + "gcgseg_data/"
 intseg_data_root = data_dir + "intseg_data/"
 vgdseg_data_root = data_dir + "vgdseg_data/"
 
-llava_imgconv_dataset = dict(
+# Per-dataset sampling ratio for training. Set value in [0, 1].
+train_ratio = dict(
+    llava_imgconv_coco=0.1,
+    llava_imgconv_vg=0.30,
+    llava_imgconv_gqa=0.30,
+    llava_imgconv_ocr_vqa=0.30,
+    llava_imgconv_textvqa=1.00,
+
+    coco_panoptic_genseg=0.2,
+    refcoco_refseg=0.25,
+    refcoco_plus_refseg=0.25,
+    refcocog_refseg=0.3,
+    lisa_reaseg=1.0,
+    grandf_gcgseg=1.0,
+    refcocog_gcgseg=1.0,
+    psg_gcgseg=1.0,
+    flickr_gcgseg=0.2,
+    coco_vgdseg=0.25,
+)
+
+_llava_imgconv_base = dict(
     type=ImgConvDataset,
-    data_path=imgconv_data_root + "llava/LLaVA-Instruct-150K/llava_v1_5_mix665k.json",
     tokenizer=tokenizer,
     cond_type=cond_type,
     special_tokens=special_tokens,
@@ -275,7 +365,6 @@ llava_imgconv_dataset = dict(
     image_processor=image_processor,
     extra_image_processor=extra_image_processor,
     task_name="imgconv",
-    data_name="llava_imgconv",
     dataset_map_fn=dict(
         type=dataset_map_fn_factory,
         fn=imgconv_map_fn,
@@ -287,6 +376,41 @@ llava_imgconv_dataset = dict(
     exclude_pure_text=True,
     pad_image_to_square=False,
     preprocess_text_data=False,
+)
+
+llava_imgconv_coco_dataset = dict(
+    **_llava_imgconv_base,
+    data_path=imgconv_data_root + "llava/LLaVA-Instruct-150K/llava_imgconv_coco.json",
+    data_name="llava_imgconv_coco",
+    train_ratio=train_ratio["llava_imgconv_coco"],
+)
+
+llava_imgconv_vg_dataset = dict(
+    **_llava_imgconv_base,
+    data_path=imgconv_data_root + "llava/LLaVA-Instruct-150K/llava_imgconv_vg.json",
+    data_name="llava_imgconv_vg",
+    train_ratio=train_ratio["llava_imgconv_vg"],
+)
+
+llava_imgconv_gqa_dataset = dict(
+    **_llava_imgconv_base,
+    data_path=imgconv_data_root + "llava/LLaVA-Instruct-150K/llava_imgconv_gqa.json",
+    data_name="llava_imgconv_gqa",
+    train_ratio=train_ratio["llava_imgconv_gqa"],
+)
+
+llava_imgconv_ocr_vqa_dataset = dict(
+    **_llava_imgconv_base,
+    data_path=imgconv_data_root + "llava/LLaVA-Instruct-150K/llava_imgconv_ocr_vqa.json",
+    data_name="llava_imgconv_ocr_vqa",
+    train_ratio=train_ratio["llava_imgconv_ocr_vqa"],
+)
+
+llava_imgconv_textvqa_dataset = dict(
+    **_llava_imgconv_base,
+    data_path=imgconv_data_root + "llava/LLaVA-Instruct-150K/llava_imgconv_textvqa.json",
+    data_name="llava_imgconv_textvqa",
+    train_ratio=train_ratio["llava_imgconv_textvqa"],
 )
 
 coco_genseg_dataset = dict(
@@ -310,6 +434,7 @@ coco_genseg_dataset = dict(
     max_length=max_length,
     use_variant_cat=True,
     pad_image_to_square=False,
+    train_ratio=train_ratio["coco_panoptic_genseg"],
 )
 
 refcoco_refseg_dataset = dict(
@@ -337,6 +462,7 @@ refcoco_refseg_dataset = dict(
     max_length=max_length,
     pad_image_to_square=False,
     ignore_label=ignore_label,
+    train_ratio=train_ratio["refcoco_refseg"],
 )
 
 refcocop_refseg_dataset = dict(
@@ -362,6 +488,7 @@ refcocop_refseg_dataset = dict(
     max_length=max_length,
     pad_image_to_square=False,
     ignore_label=ignore_label,
+    train_ratio=train_ratio["refcoco_plus_refseg"],
 )
 
 refcocog_refseg_dataset = dict(
@@ -387,13 +514,18 @@ refcocog_refseg_dataset = dict(
     max_length=max_length,
     pad_image_to_square=False,
     ignore_label=ignore_label,
+    train_ratio=train_ratio["refcocog_refseg"],
 )
+
+_lisa_explain_path = reaseg_data_root + "lisa/explanatory/train.json"
+if not __import__("os").path.exists(_lisa_explain_path):
+    _lisa_explain_path = None
 
 lisa_reaseg_dataset = dict(
     type=ReaSegDataset,
     data_root=reaseg_data_root + "lisa",
     image_folder=reaseg_data_root + "lisa/train",
-    explain_path=reaseg_data_root + "lisa/explanatory/train.json",
+    explain_path=_lisa_explain_path,
     data_mode="train",
     tokenizer=tokenizer,
     task_name="reaseg",
@@ -414,6 +546,7 @@ lisa_reaseg_dataset = dict(
     max_length=max_length,
     pad_image_to_square=False,
     ignore_label=ignore_label,
+    train_ratio=train_ratio["lisa_reaseg"],
 )
 
 grandf_gcgseg_dataset = dict(
@@ -438,6 +571,7 @@ grandf_gcgseg_dataset = dict(
     max_length=max_length,
     pad_image_to_square=False,
     ignore_label=ignore_label,
+    train_ratio=train_ratio["grandf_gcgseg"],
 )
 
 refcocog_gcgseg_dataset = dict(
@@ -462,6 +596,7 @@ refcocog_gcgseg_dataset = dict(
     max_length=max_length,
     pad_image_to_square=False,
     ignore_label=ignore_label,
+    train_ratio=train_ratio["refcocog_gcgseg"],
 )
 
 psg_gcgseg_dataset = dict(
@@ -486,6 +621,7 @@ psg_gcgseg_dataset = dict(
     max_length=max_length,
     pad_image_to_square=False,
     ignore_label=ignore_label,
+    train_ratio=train_ratio["psg_gcgseg"],
 )
 
 flickr_gcgseg_dataset = dict(
@@ -510,6 +646,7 @@ flickr_gcgseg_dataset = dict(
     max_length=max_length,
     pad_image_to_square=False,
     ignore_label=ignore_label,
+    train_ratio=train_ratio["flickr_gcgseg"],
 )
 
 coco_vgdseg_dataset = dict(
@@ -535,25 +672,28 @@ coco_vgdseg_dataset = dict(
     num_class=5,
     max_length=max_length,
     pad_image_to_square=False,
+    train_ratio=train_ratio["coco_vgdseg"],
 )
 
-train_datasets = dict(
-    type=ConcatDataset,
-    oversample_ratio=0.1,
-    datasets=[
-        llava_imgconv_dataset,
-        coco_genseg_dataset,
-        refcoco_refseg_dataset,
-        refcocop_refseg_dataset,
-        refcocog_refseg_dataset,
-        lisa_reaseg_dataset,
-        grandf_gcgseg_dataset,
-        refcocog_gcgseg_dataset,
-        psg_gcgseg_dataset,
-        flickr_gcgseg_dataset,
-        coco_vgdseg_dataset,
-    ],
-)
+_train_dataset_list = [
+    llava_imgconv_coco_dataset,
+    llava_imgconv_vg_dataset,
+    llava_imgconv_gqa_dataset,
+    llava_imgconv_ocr_vqa_dataset,
+    llava_imgconv_textvqa_dataset,
+    coco_genseg_dataset,
+    refcoco_refseg_dataset,
+    refcocop_refseg_dataset,
+    refcocog_refseg_dataset,
+    lisa_reaseg_dataset,
+    grandf_gcgseg_dataset,
+    refcocog_gcgseg_dataset,
+    psg_gcgseg_dataset,
+    flickr_gcgseg_dataset,
+    coco_vgdseg_dataset,
+]
+
+train_datasets = dict(type=ConcatDataset, oversample_ratio=0.1, datasets=_train_dataset_list)
 
 train_dataloader = dict(
     batch_size=batch_size,
@@ -1528,12 +1668,8 @@ val_evaluators = [
     ),
 ]
 
+# Keep lazy-config parse safe: avoid parse-time copy/mutation on lazy objects.
 vis_datasets = val_datasets
-
-vis_datasets = deepcopy(val_datasets)
-for dataset in vis_datasets:
-    if dataset["task_name"] in ["genseg", "ovseg", "vgdseg", "intseg"]:
-        dataset["postprocess_fn"]["threshold"] = 0.5  # type: ignore
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
@@ -1599,38 +1735,60 @@ custom_hooks = [
         display_params=True,
     ),
     dict(type=DatasetInfoHook, tokenizer=tokenizer, special_tokens=special_tokens),
-    dict(
-        type=EvaluateChatHook,
-        tokenizer=tokenizer,
-        special_tokens=special_tokens,
-        image_processor=image_processor,
-        postprocess_fns=[
-            None,
-            genseg_postprocess_fn,
-            refseg_postprocess_fn,
-            reaseg_postprocess_fn,
-            gcgseg_postprocess_fn,
-            intseg_postprocess_fn,
-            intseg_postprocess_fn,
-            intseg_postprocess_fn,
-            intseg_postprocess_fn,
-            vgdseg_postprocess_fn,
-            vgdseg_postprocess_fn,
-            vgdseg_postprocess_fn,
-            vgdseg_postprocess_fn,
-            vgdseg_postprocess_fn,
-        ],
-        extra_image_processor=extra_image_processor,
-        visualizer=visualizer,
-        every_n_iters=evaluation_freq,
-        evaluation_inputs=evaluation_inputs,
-        evaluation_images=evaluation_images,
-        vprompt_masks=vprompt_masks,
-        system=SYSTEM,
-        prompt_template=prompt_template,
-    ),
     dict(type=PTCheckpointHook, clean_pth=False),
 ]
+
+_enable_eval_chat_hook = evaluation_images is not None and len(evaluation_images) > 0
+if _enable_eval_chat_hook:
+    for _img in evaluation_images:
+        if not __import__("os").path.exists(_img):
+            _enable_eval_chat_hook = False
+            break
+if _enable_eval_chat_hook and vprompt_masks is not None:
+    for _mask_group in vprompt_masks:
+        if _mask_group[0] is None:
+            continue
+        for _mask_path in _mask_group:
+            if not __import__("os").path.exists(_mask_path):
+                _enable_eval_chat_hook = False
+                break
+        if not _enable_eval_chat_hook:
+            break
+
+if _enable_eval_chat_hook:
+    custom_hooks.insert(
+        2,
+        dict(
+            type=EvaluateChatHook,
+            tokenizer=tokenizer,
+            special_tokens=special_tokens,
+            image_processor=image_processor,
+            postprocess_fns=[
+                None,
+                genseg_postprocess_fn,
+                refseg_postprocess_fn,
+                reaseg_postprocess_fn,
+                gcgseg_postprocess_fn,
+                intseg_postprocess_fn,
+                intseg_postprocess_fn,
+                intseg_postprocess_fn,
+                intseg_postprocess_fn,
+                vgdseg_postprocess_fn,
+                vgdseg_postprocess_fn,
+                vgdseg_postprocess_fn,
+                vgdseg_postprocess_fn,
+                vgdseg_postprocess_fn,
+            ],
+            extra_image_processor=extra_image_processor,
+            visualizer=visualizer,
+            every_n_iters=evaluation_freq,
+            evaluation_inputs=evaluation_inputs,
+            evaluation_images=evaluation_images,
+            vprompt_masks=vprompt_masks,
+            system=SYSTEM,
+            prompt_template=prompt_template,
+        ),
+    )
 
 # configure default hooks
 default_hooks = dict(
@@ -1679,3 +1837,9 @@ log_processor = dict(
     window_size=1,
     mean_pattern=r".*(loss|time|data_time|grad_norm|tflops).*",
 )
+
+"""
+bash run.sh --modes train \
+  --config xsam/xsam/configs/xsam/s3_mixed_finetune/sam2/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu2_mixed_finetune.py
+
+"""

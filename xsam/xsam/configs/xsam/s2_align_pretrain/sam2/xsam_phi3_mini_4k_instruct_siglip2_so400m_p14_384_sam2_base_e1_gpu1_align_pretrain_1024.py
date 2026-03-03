@@ -3,7 +3,7 @@ from mmengine.dataset import DefaultSampler
 from mmengine.hooks import CheckpointHook, DistSamplerSeedHook, IterTimerHook, LoggerHook, ParamSchedulerHook
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from torch.optim import AdamW
-from transformers import AutoModelForCausalLM, AutoTokenizer, SiglipImageProcessor, SiglipVisionModel
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, SiglipImageProcessor, SiglipVisionModel
 from xtuner.utils import PROMPT_TEMPLATE
 
 from xsam.dataset import ImgConvDataset
@@ -23,18 +23,20 @@ from xsam.model.segmentors.sam2 import Sam2Model
 # NOTE:
 # mmengine lazy config does not allow calling imported functions (e.g. getenv) at parse time.
 code_dir = __import__("os").environ.get("CODE_DIR", "./xsam/")
-data_dir = __import__("os").environ.get("DATA_DIR", "./datas/")
+data_dir = __import__("os").environ.get("DATA_DIR", "./data/")
 init_dir = __import__("os").environ.get("INIT_DIR", "./inits/")
 work_dir = __import__("os").environ.get("WORK_DIR", "./runs/")
 
 # Model
-llm_name_or_path = init_dir + "Phi-3-mini-4k-instruct"
+llm_name_or_path = init_dir + "extracted_weights/lvlm/xsam_siglip2_hf_4bit"
+# NOTE: Siglip*ImageProcessor/SiglipVisionModel.from_pretrained expects a HF directory.
+# Do not point to a single .bin file here.
 visual_encoder_name_or_path = init_dir + "siglip2-so400m-patch14-384"
 seg_encoder_name_or_path = init_dir + "sam2.1-hiera-base-plus"
 
 # Specify the pretrained pth (from your Stage-1 SAM2 run)
-s1_pretrained_pth = work_dir + "s1_seg_finetune/xsam_sam2_base_1024_e3_gpu1_seg_finetune/pytorch_model.bin"
-s2_pretrained_pth = init_dir + "extracted_weights/lvlm/xsam_siglip2.bin"
+s1_pretrained_pth = work_dir + "s1_seg_finetune/xsam_sam2_base_1024_e3_gpu1_seg_finetune_v1/pytorch_model.bin"
+s2_pretrained_pth = init_dir + "extracted_weights/s2_init/xsam2_img_encoder_plus_projector.bin"
 
 # Data
 data_root = data_dir + "imgconv_data/"
@@ -45,15 +47,24 @@ max_length = int(4096 - (384 / 14) ** 2 - 1024)
 
 # Scheduler & Optimizer
 batch_size = 8  # per_device (gpu1)
-accumulative_counts = 16
+accumulative_counts = 32
 dataloader_num_workers = 8
-max_epochs = 0.25
+max_epochs = 1
 optim_type = AdamW
-lr = 5e-4
+lr = 1e-3
 betas = (0.9, 0.999)
 weight_decay = 0
 max_norm = 1  # grad clip
 warmup_ratio = 0.03
+
+# 4-bit LLM loading
+llm_quantization_config = dict(
+    type=BitsAndBytesConfig,
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_compute_dtype=torch.bfloat16,
+)
 
 # Save
 save_steps = 2000
@@ -109,6 +120,8 @@ model = dict(
         pretrained_model_name_or_path=llm_name_or_path,
         trust_remote_code=False,  # from transformers
         torch_dtype=torch.bfloat16,
+        quantization_config=llm_quantization_config,
+        low_cpu_mem_usage=True,
         attn_implementation="flash_attention_2",
     ),
     visual_encoder=dict(
@@ -273,6 +286,7 @@ log_processor = dict(
 
 """
 bash run.sh --modes train \
-  --config xsam/xsam/configs/xsam/s2_align_pretrain/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_e1_gpu1_align_pretrain.py
+  --config xsam/xsam/configs/xsam/s2_align_pretrain/sam2/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_e1_gpu1_align_pretrain_1024.py
 
+  
 """

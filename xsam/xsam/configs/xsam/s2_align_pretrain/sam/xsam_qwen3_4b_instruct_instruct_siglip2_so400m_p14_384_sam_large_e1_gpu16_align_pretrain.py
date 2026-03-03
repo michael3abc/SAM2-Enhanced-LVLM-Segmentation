@@ -23,12 +23,12 @@ from xsam.utils.template import PROMPT_TEMPLATE
 #######################################################################
 # Directories
 code_dir = getenv("CODE_DIR", "./xsam/")
-data_dir = getenv("DATA_DIR", "./datas/")
+data_dir = getenv("DATA_DIR", "./data/")
 init_dir = getenv("INIT_DIR", "./inits/")
 work_dir = getenv("WORK_DIR", "./runs/")
 
 # Model
-llm_name_or_path = init_dir + "vicuna-7b-v1.5"
+llm_name_or_path = init_dir + "Qwen3-4B-Instruct-2507"
 visual_encoder_name_or_path = init_dir + "siglip2-so400m-patch14-384"
 seg_encoder_name_or_path = init_dir + "sam-vit-large"
 
@@ -39,7 +39,7 @@ s1_pretrained_pth = work_dir + "s1_seg_finetune/xsam_sam_large_m2f_e36_gpu16_seg
 data_root = data_dir + "imgconv_data/"
 data_path = data_root + "llava/LLaVA-Pretrain/blip_laion_cc_sbu_558k.json"
 image_folder = data_root + "llava/LLaVA-Pretrain/images"
-prompt_template = PROMPT_TEMPLATE.vicuna
+prompt_template = PROMPT_TEMPLATE.qwen3_instruct
 max_length = int(40960 - (384 / 14) ** 2 - 1024)
 
 # Scheduler & Optimizer

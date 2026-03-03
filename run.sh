@@ -52,7 +52,7 @@ export PATH="$venv_dir/bin:$PATH"
 code_name="xsam"
 code_dir="$root_dir/$code_name"
 src_code_dir="$code_dir"
-data_dir="$root_dir/datas"
+data_dir="$root_dir/data"
 init_dir="$root_dir/inits"
 work_dir="$root_dir/runs"
 export ROOT_DIR="$root_dir/"
@@ -70,8 +70,25 @@ export TOKENIZERS_PARALLELISM=false
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 export XTUNER_DATASET_TIMEOUT=120
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
-export CUDA_VISIBLE_DEVICES=0
-export GPU_PER_NODE=1
+if [[ -z "${GPU_PER_NODE:-}" ]]; then
+    if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+        IFS=',' read -ra _visible_gpu_ids <<< "$CUDA_VISIBLE_DEVICES"
+        if [[ "${#_visible_gpu_ids[@]}" -gt 0 ]]; then
+            export GPU_PER_NODE="${#_visible_gpu_ids[@]}"
+        else
+            export GPU_PER_NODE=1
+        fi
+    elif command -v nvidia-smi >/dev/null 2>&1; then
+        _gpu_count=$(nvidia-smi -L | wc -l | tr -d ' ')
+        if [[ -n "$_gpu_count" && "$_gpu_count" -ge 1 ]]; then
+            export GPU_PER_NODE="$_gpu_count"
+        else
+            export GPU_PER_NODE=1
+        fi
+    else
+        export GPU_PER_NODE=1
+    fi
+fi
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 export NCCL_NET_GDR_LEVEL=2
@@ -89,6 +106,7 @@ default_modes=("train" "segeval" "vlmeval" "visualize")
 modes=()
 config_file=""
 suffix=""
+segeval_resume=0
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -118,14 +136,18 @@ while [[ $# -gt 0 ]]; do
             shift
             work_dir="$1"
             ;;
+        --resume)
+            segeval_resume=1
+            ;;
         --help|-h)
-            echo "Usage: $0 [--modes MODE1,MODE2,...] --config CONFIG_FILE [--work-dir WORK_DIR] [--suffix SUFFIX] [--help]"
+            echo "Usage: $0 [--modes MODE1,MODE2,...] --config CONFIG_FILE [--work-dir WORK_DIR] [--suffix SUFFIX] [--resume] [--help]"
             echo "Available modes: train, segeval, vlmeval, visualize, demo"
             echo "Arguments:"
             echo "  --modes, -m          Specify modes to run (comma-separated or space-separated)"
             echo "  --config, -c         Specify config file path (REQUIRED)"
             echo "  --work-dir, -w       Specify work directory path (optional)"
             echo "  --suffix, -s         Specify suffix for work directory (optional)"
+            echo "  --resume             Enable segeval resume (skip datasets with complete predictions)"
             echo "  --help, -h           Show this help message"
             echo "Examples:"
             echo "  $0 --config path/to/config.py                    # Run all modes with specified config"
@@ -133,6 +155,7 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 --config config.py --modes train,segeval     # Run training and segmentation evaluation"
             echo "  $0 --config config.py --work-dir /path/to/work   # Run with custom work directory"
             echo "  $0 --config config.py --suffix test             # Run with suffix 'test'"
+            echo "  $0 --config config.py --modes segeval --resume  # Resume segmentation evaluation"
             echo "  $0 --config config.py --modes demo --work-dir /path/to/work  # Launch local Gradio demo (requires checkpoint in work-dir)"
             exit 0
             ;;
@@ -187,6 +210,9 @@ if [[ "$work_dir" == "$root_dir/runs" || "$work_dir" == "$root_dir/runs/" ]]; th
     fi
     work_dir="$work_dir/$prefix/$model_name$suffix_norm"
 fi
+
+# Normalize to absolute path so later `cd` operations won't break path checks.
+work_dir="$(realpath -m "$work_dir")"
 
 ckpt_file="$work_dir/pytorch_model.bin"
 
@@ -243,6 +269,9 @@ for mode in "${modes[@]}"
 do
     cd $root_dir
     echo -e "$log_format Mode: $mode."
+    if [ "$mode" = "segeval" ] && [ "$segeval_resume" = "1" ]; then
+        echo -e "$log_format segeval resume: enabled."
+    fi
     time=$(date "+%Y%m%d-%H%M%S")
     if [ $mode = "train" ] && [ ! -d "$work_dir" ] && [ $node_rank = 0 ]; then
         mkdir -p $work_dir
@@ -300,6 +329,10 @@ do
     if [ $mode = "segeval" ] && [ $trained_flag = 1 ]; then
         echo -e "$log_format Evaluating Seg: $model_name."
         [ $node_rank -ne 0 ] && sleep 60
+        segeval_resume_args=()
+        if [ "$segeval_resume" = "1" ]; then
+            segeval_resume_args+=(--resume)
+        fi
         PYTHONPATH="$(realpath $code_dir)":$PYTHONPATH OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
             "${torchrun_cmd[@]}" --master_addr=$master_addr --master_port=$master_port --nproc_per_node=$gpu_per_node \
             $code_dir/xsam/tools/eval.py \
@@ -307,7 +340,8 @@ do
             --launcher pytorch \
             --work-dir $work_dir \
             --seed 0 \
-            --pth_model latest | { [ $node_rank = "0" ] && tee $work_dir/${mode}-${time}.log || cat; }
+            --pth_model latest \
+            "${segeval_resume_args[@]}" | { [ $node_rank = "0" ] && tee $work_dir/${mode}-${time}.log || cat; }
     fi
     # mode: vlmeval
     if [ $mode = "vlmeval" ] && [ $trained_flag = 1 ]; then

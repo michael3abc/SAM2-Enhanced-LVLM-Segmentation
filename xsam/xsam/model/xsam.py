@@ -4,7 +4,7 @@ import os.path as osp
 from collections import OrderedDict
 from dataclasses import dataclass
 from itertools import accumulate, chain
-from typing import Dict, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 import torch
 import torch.nn as nn
@@ -57,6 +57,9 @@ class XSamOutput(ModelOutput):
     masks_queries_logits: torch.FloatTensor = None
 
 
+
+
+
 class XSamModel(BaseModel):
     def __init__(
         self,
@@ -76,6 +79,9 @@ class XSamModel(BaseModel):
         extract_seg_embeds=True,
         s1_pretrained_pth=None,
         s2_pretrained_pth=None,
+        visual_encoder_pretrained_pth=None,
+        projector_pretrained_pth=None,
+        llm_projector_pretrained_pth=None,
         projector_depth=2,
         downsample_ratio=0.5,
         llm_lora=None,
@@ -242,6 +248,30 @@ class XSamModel(BaseModel):
             if len(missed_keys) > 0:
                 print_log(f"Missed keys: {missed_keys}", logger="current", level=logging.WARNING)
 
+        if visual_encoder_pretrained_pth is not None:
+            self._load_partial_pretrained(
+                checkpoint_path=visual_encoder_pretrained_pth,
+                target_prefixes=["visual_encoder"],
+                source_prefix_map={"visual_encoder": ["vision_model"]},
+                ckpt_tag="visual_encoder_pretrained_pth",
+            )
+
+        if projector_pretrained_pth is not None:
+            self._load_partial_pretrained(
+                checkpoint_path=projector_pretrained_pth,
+                target_prefixes=["visual_projector", "seg_projector"],
+                source_prefix_map={},
+                ckpt_tag="projector_pretrained_pth",
+            )
+
+        if llm_projector_pretrained_pth is not None:
+            self._load_partial_pretrained(
+                checkpoint_path=llm_projector_pretrained_pth,
+                target_prefixes=["llm_projector"],
+                source_prefix_map={},
+                ckpt_tag="llm_projector_pretrained_pth",
+            )
+
         # Apply LoRA after checkpoint loading so base-model keys can be restored
         # from non-LoRA checkpoints (e.g. full LLM weights) before PEFT wrapping.
         if self.use_llm_lora:
@@ -270,6 +300,94 @@ class XSamModel(BaseModel):
         `torch.dtype`: The dtype of the module (assuming that all the module parameters have the same dtype).
         """
         return get_parameter_dtype(self)
+
+    def _extract_state_by_prefixes(
+        self,
+        pretrained_state_dict: Dict[str, torch.Tensor],
+        target_prefixes: List[str],
+        source_prefix_map: Optional[Dict[str, List[str]]] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """Extract checkpoint tensors by module prefixes.
+
+        Args:
+            pretrained_state_dict: Full checkpoint state dict.
+            target_prefixes: Target module prefixes on current model.
+            source_prefix_map: Optional map from target prefix to source prefixes.
+
+        Returns:
+            Extracted state dict whose keys match current model naming.
+        """
+        source_prefix_map = source_prefix_map or {}
+        extracted_state_dict = OrderedDict()
+
+        for target_prefix in target_prefixes:
+            target_prefix_with_dot = f"{target_prefix}."
+            for key, value in pretrained_state_dict.items():
+                if key.startswith(target_prefix_with_dot):
+                    extracted_state_dict[key] = value
+
+            for source_prefix in source_prefix_map.get(target_prefix, []):
+                source_prefix_with_dot = f"{source_prefix}."
+                for key, value in pretrained_state_dict.items():
+                    if key.startswith(source_prefix_with_dot):
+                        mapped_key = target_prefix_with_dot + key[len(source_prefix_with_dot) :]
+                        if mapped_key not in extracted_state_dict:
+                            extracted_state_dict[mapped_key] = value
+
+        return extracted_state_dict
+
+    def _load_partial_pretrained(
+        self,
+        checkpoint_path: str,
+        target_prefixes: List[str],
+        source_prefix_map: Optional[Dict[str, List[str]]] = None,
+        ckpt_tag: str = "partial_pretrained",
+    ) -> None:
+        """Load only selected module weights from one checkpoint.
+
+        Args:
+            checkpoint_path: Path of source checkpoint.
+            target_prefixes: Target module prefixes to be loaded.
+            source_prefix_map: Optional map for prefix remapping.
+            ckpt_tag: Human-readable tag for logging.
+
+        Returns:
+            None.
+        """
+        pretrained_state_dict = guess_load_checkpoint(checkpoint_path)
+        partial_state_dict = self._extract_state_by_prefixes(
+            pretrained_state_dict=pretrained_state_dict,
+            target_prefixes=target_prefixes,
+            source_prefix_map=source_prefix_map,
+        )
+
+        if len(partial_state_dict) == 0:
+            print_log(
+                f"Skip {ckpt_tag}: no matched prefixes {target_prefixes} in {checkpoint_path}",
+                logger="current",
+                level=logging.WARNING,
+            )
+            return
+
+        self.load_state_dict(partial_state_dict, strict=False)
+
+        state_dict = super().state_dict()
+        matched_keys = [k for k in partial_state_dict.keys() if k in state_dict.keys()]
+        mismatched_keys = [k for k in partial_state_dict.keys() if k not in state_dict.keys()]
+        target_keys = [
+            k for k in state_dict.keys() if any(k.startswith(f"{prefix}.") for prefix in target_prefixes)
+        ]
+        missed_keys = [k for k in target_keys if k not in partial_state_dict.keys()]
+
+        print_log(f"Load {ckpt_tag} from {checkpoint_path}", logger="current")
+        print_log(
+            f"Matched keys: {len(matched_keys)} / {len(partial_state_dict.keys())} for {target_prefixes}",
+            logger="current",
+        )
+        if len(mismatched_keys) > 0:
+            print_log(f"Mismatched keys: {mismatched_keys}", logger="current", level=logging.WARNING)
+        if len(missed_keys) > 0:
+            print_log(f"Missed keys: {missed_keys}", logger="current", level=logging.WARNING)
 
     def _add_special_tokens(self, special_tokens):
         assert all(token in DEFAULT_SPECIAL_TOKENS for token in special_tokens)

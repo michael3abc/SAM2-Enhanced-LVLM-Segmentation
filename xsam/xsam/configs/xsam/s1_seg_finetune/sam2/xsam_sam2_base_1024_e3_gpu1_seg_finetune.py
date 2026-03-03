@@ -21,7 +21,7 @@ from xsam.model.segmentors.sam2 import Sam2Model
 #######################################################################
 # Directories
 code_dir = __import__("os").environ.get("CODE_DIR", "./xsam/")
-data_dir = __import__("os").environ.get("DATA_DIR", "./datas/")
+data_dir = __import__("os").environ.get("DATA_DIR", "./data/")
 init_dir = __import__("os").environ.get("INIT_DIR", "./inits/")
 work_dir = __import__("os").environ.get("WORK_DIR", "./runs/")
 
@@ -39,10 +39,10 @@ panseg_map_folder = data_root + "coco2017/panoptic_train2017"
 image_size = int(1024)
 
 # Scheduler & Optimizer
-batch_size = 4  # per_device
-accumulative_counts = 16
+batch_size = 64  # per_device
+accumulative_counts = 1
 dataloader_num_workers = 8
-max_epochs = 3
+max_epochs = 12
 optim_type = AdamW
 lr = 1e-4
 betas = (0.9, 0.999)
@@ -51,7 +51,7 @@ max_norm = 0.01  # grad clip
 warmup_ratio = 0.03
 
 # Save
-save_steps = 2000
+save_steps = 5000
 save_total_limit = 2  # Maximum checkpoints to keep (-1 means unlimited)
 
 # Logging
@@ -70,7 +70,7 @@ extra_image_processor = dict(
 model = dict(
     type=XSamModel,
     freeze_segmentor_encoder=False,
-    use_activation_checkpointing=False,
+    use_activation_checkpointing=True,
     s1_pretrained_pth=s1_pretrained_pth,
     postprocess_fn=genseg_postprocess_fn,
     connector_type=None,
@@ -310,9 +310,10 @@ log_processor = dict(
     mean_pattern=r".*(loss|time|data_time|grad_norm|tflops).*",
 )
 
-find_unused_parameters = True
+find_unused_parameters = False
 
 """
+DEEPSPEED_CFG=deepspeed_zero1
 bash ./run.sh --modes train \
   --config xsam/xsam/configs/xsam/s1_seg_finetune/sam2/xsam_sam2_base_1024_e3_gpu1_seg_finetune.py
 """

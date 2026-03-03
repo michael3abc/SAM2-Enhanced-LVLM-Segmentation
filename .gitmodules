@@ -1,3 +1,9 @@
 [submodule "external/sam2"]
 	path = external/sam2
 	url = https://github.com/facebookresearch/sam2.git
+[submodule "inits/mask2former-swin-large-coco-panoptic"]
+	path = inits/mask2former-swin-large-coco-panoptic
+	url = https://huggingface.co/facebook/mask2former-swin-large-coco-panoptic
+[submodule "external/sam3"]
+	path = external/sam3
+	url = https://github.com/facebookresearch/sam3.git

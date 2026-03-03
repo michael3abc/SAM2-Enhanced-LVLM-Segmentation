@@ -6,6 +6,7 @@ from mmengine.hooks import CheckpointHook, DistSamplerSeedHook, IterTimerHook, L
 from mmengine.optim import AmpOptimWrapper, CosineAnnealingLR, LinearLR
 from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer, SiglipImageProcessor, SiglipVisionModel
+from xtuner.utils import PROMPT_TEMPLATE
 
 from xsam.dataset import ImgConvDataset
 from xsam.dataset.collate_fns import xsam_collate_fn
@@ -16,19 +17,18 @@ from xsam.engine.runner import TrainLoop
 from xsam.model import XSamModel
 from xsam.model.segmentors import XSegmentor
 from xsam.model.segmentors.sam import SamModel
-from xsam.utils.template import PROMPT_TEMPLATE
 
 #######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Directories
 code_dir = getenv("CODE_DIR", "./xsam/")
-data_dir = getenv("DATA_DIR", "./datas/")
+data_dir = getenv("DATA_DIR", "./data/")
 init_dir = getenv("INIT_DIR", "./inits/")
 work_dir = getenv("WORK_DIR", "./runs/")
 
 # Model
-llm_name_or_path = init_dir + "Qwen3-1.7B"
+llm_name_or_path = init_dir + "Phi-3-mini-4k-instruct"
 visual_encoder_name_or_path = init_dir + "siglip2-so400m-patch14-384"
 seg_encoder_name_or_path = init_dir + "sam-vit-large"
 
@@ -39,8 +39,8 @@ s1_pretrained_pth = work_dir + "s1_seg_finetune/xsam_sam_large_m2f_e36_gpu16_seg
 data_root = data_dir + "imgconv_data/"
 data_path = data_root + "llava/LLaVA-Pretrain/blip_laion_cc_sbu_558k.json"
 image_folder = data_root + "llava/LLaVA-Pretrain/images"
-prompt_template = PROMPT_TEMPLATE.qwen3_wothinking
-max_length = int(40960 - (384 / 14) ** 2 - 1024)
+prompt_template = PROMPT_TEMPLATE.phi3_chat
+max_length = int(4096 - (384 / 14) ** 2 - 1024)
 
 # Scheduler & Optimizer
 batch_size = 4  # per_device
@@ -268,3 +268,5 @@ log_processor = dict(
     window_size=1,
     mean_pattern=r".*(loss|time|data_time|grad_norm|tflops).*",
 )
+
+

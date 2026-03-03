@@ -29,6 +29,7 @@ from .mask2former import (
 
 from .sam import SamMaskDecoder, SamModel, SamVisionEncoder
 from .sam2 import Sam2Model, Sam2VisionModel as Sam2VisionEncoder
+from .sam3 import Sam3Model, Sam3VisionModel as Sam3VisionEncoder
 
 try:
     from transformers.models.sam2.modeling_sam2 import Sam2Model as HFSam2Model
@@ -39,6 +40,10 @@ except Exception:
 
 SAM2_MODEL_TYPES = (Sam2Model,) + ((HFSam2Model,) if HFSam2Model is not None else ())
 SAM2_VISION_TYPES = (Sam2VisionEncoder,) + ((HFSam2VisionModel,) if HFSam2VisionModel is not None else ())
+SAM3_MODEL_TYPES = (Sam3Model,)
+SAM3_VISION_TYPES = (Sam3VisionEncoder,)
+MULTISCALE_SAM_MODEL_TYPES = SAM2_MODEL_TYPES + SAM3_MODEL_TYPES
+MULTISCALE_SAM_VISION_TYPES = SAM2_VISION_TYPES + SAM3_VISION_TYPES
 
 @dataclass
 class XSegmentorOutput(ModelOutput):
@@ -55,7 +60,7 @@ class XSegmentorOutput(ModelOutput):
 class XSegmentor(PreTrainedModel):
     supports_gradient_checkpointing = True
 
-    def __init__(self, encoder: Union[SamModel, Sam2Model, Mask2FormerModel], decoder=None, torch_dtype=torch.float32, reinit_decoder=False, drop_decoder=False, close_cls=False, open_cls=False):  # type: ignore
+    def __init__(self, encoder: Union[SamModel, Sam2Model, Sam3Model, Mask2FormerModel], decoder=None, torch_dtype=torch.float32, reinit_decoder=False, drop_decoder=False, close_cls=False, open_cls=False):  # type: ignore
         # transformers>=5 defaults to SDPA; force eager to avoid unsupported path
         if not hasattr(encoder.config, "attn_implementation") or encoder.config.attn_implementation is None:
             encoder.config.attn_implementation = "eager"
@@ -81,7 +86,7 @@ class XSegmentor(PreTrainedModel):
             self.encoder = encoder.vision_encoder
             self.pixel_decoder = decoder.pixel_level_module.decoder
             self.decoder = decoder.transformer_module
-        elif isinstance(encoder, SAM2_MODEL_TYPES) and isinstance(decoder, Mask2FormerModel):
+        elif isinstance(encoder, MULTISCALE_SAM_MODEL_TYPES) and isinstance(decoder, Mask2FormerModel):
             self.enc_config = encoder.config.vision_config
             self.dec_config = decoder.config
             self.prompt_enc_config = encoder.config.prompt_encoder_config
@@ -91,10 +96,15 @@ class XSegmentor(PreTrainedModel):
             self.prompt_encoder = encoder.prompt_encoder
             self.pixel_decoder = decoder.pixel_level_module.decoder
             self.decoder = decoder.transformer_module
-            if not hasattr(self.enc_config, "hidden_size"):
-                self.enc_config.hidden_size = getattr(self.enc_config, "fpn_hidden_size", None) or getattr(
-                    self.enc_config, "output_channels", None
-                )
+            fpn_hidden_size = (
+                getattr(self.enc_config, "fpn_hidden_size", None)
+                or getattr(self.enc_config, "output_channels", None)
+                or getattr(self.enc_config, "neck_hidden_size", None)
+            )
+            if fpn_hidden_size is not None:
+                self.enc_config.hidden_size = fpn_hidden_size
+            elif not hasattr(self.enc_config, "hidden_size"):
+                self.enc_config.hidden_size = None
             self.sam2_fpn_bridge = None
             target_channels = getattr(self.dec_config, "feature_channels", None)
             num_levels = getattr(self.dec_config, "num_feature_levels", None)
@@ -111,15 +121,20 @@ class XSegmentor(PreTrainedModel):
                         nn.init.zeros_(layer.bias)
                         for out_idx in range(layer.out_channels):
                             layer.weight.data[out_idx, out_idx % layer.in_channels, 0, 0] = 1.0
-        elif isinstance(encoder, SAM2_MODEL_TYPES) and decoder is None and drop_decoder:
+        elif isinstance(encoder, MULTISCALE_SAM_MODEL_TYPES) and decoder is None and drop_decoder:
             # Stage-2 alignment can run encoder-only path (no mask decoder).
             self.enc_config = encoder.config.vision_config
             self.dec_config = None
             self.prompt_enc_config = encoder.config.prompt_encoder_config
-            if not hasattr(self.enc_config, "hidden_size"):
-                self.enc_config.hidden_size = getattr(self.enc_config, "fpn_hidden_size", None) or getattr(
-                    self.enc_config, "output_channels", None
-                )
+            fpn_hidden_size = (
+                getattr(self.enc_config, "fpn_hidden_size", None)
+                or getattr(self.enc_config, "output_channels", None)
+                or getattr(self.enc_config, "neck_hidden_size", None)
+            )
+            if fpn_hidden_size is not None:
+                self.enc_config.hidden_size = fpn_hidden_size
+            elif not hasattr(self.enc_config, "hidden_size"):
+                self.enc_config.hidden_size = None
 
             self.shared_image_embedding = None
             self.encoder = encoder.vision_encoder
@@ -214,6 +229,8 @@ class XSegmentor(PreTrainedModel):
             return self.encoder.patch_embed
         elif isinstance(self.encoder, SAM2_VISION_TYPES):
             return self.encoder.backbone.patch_embed
+        elif isinstance(self.encoder, SAM3_VISION_TYPES):
+            return self.encoder.get_input_embeddings()
         elif hasattr(self.encoder, "get_input_embeddings"):
             return self.encoder.get_input_embeddings()
         elif hasattr(self.encoder, "embeddings"):
@@ -474,8 +491,8 @@ class XSegmentor(PreTrainedModel):
                 cond_lens=cond_lens,
                 output_attentions=output_attentions,
             )
-        # sam2_enc + mask2former_dec
-        elif isinstance(self.encoder, SAM2_VISION_TYPES) and isinstance(self.decoder, Mask2FormerTransformerModule):
+        # sam2/sam3_enc + mask2former_dec
+        elif isinstance(self.encoder, MULTISCALE_SAM_VISION_TYPES) and isinstance(self.decoder, Mask2FormerTransformerModule):
             if image_embeddings is None:
                 encoder_outputs = self.encoder(
                     pixel_values,

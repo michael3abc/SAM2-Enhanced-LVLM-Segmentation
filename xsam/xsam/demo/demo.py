@@ -701,15 +701,40 @@ if __name__ == "__main__":
     main()
 
 """
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-python xsam/xsam/demo/demo.py \
-  xsam/xsam/configs/xsam/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_768_m2f_gpu16_mixed_finetune.py \
-  --image data/coco2017/train2017/000000000009.jpg \
-  --prompt "ins: broccoli, bread, muffin, almonds; sem: tray" \
-  --task_name genseg \
-  --score_thr 0.15 \
-  --work-dir runs \
-  --pth_model inits/X-SAM/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune/pytorch_model.sam2_reuse_with_sam2encoder_pixeldecoder.bin \
-  --cfg-options model.use_dual_encoder=False model.use_vision_sampler=False model.sampler_input_feat='pixel_values'
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# 原作者權重
+CFG=xsam/xsam/configs/xsam/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune.py
+WORK=inits/X-SAM/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune
+CKPT=$WORK/pytorch_model.bin
+
+python xsam/xsam/demo/demo.py $CFG \
+  --pth_model $CKPT \
+  --image xsam/xsam/demo/images/genseg.jpg \
+  --prompt "ins: person, bird, boat; sem: water, sky" \
+  --task_name genseg
+
+# SAM2 FT 
+CFG=xsam/xsam/configs/xsam/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu1_mixed_finetune.py
+WORK=runs/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu1_mixed_finetune
+CKPT=$WORK/pytorch_model.bin
+
+python xsam/xsam/demo/demo.py $CFG \
+  --pth_model $CKPT \
+  --image xsam/xsam/demo/images/genseg.jpg \
+  --prompt "ins: person, bird, boat; sem: water, sky" \
+  --task_name genseg
+
+  
+
+
+# EVAL
+
+CFG=xsam/xsam/configs/xsam/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu1_mixed_finetune.py
+WORK=/home/michael/projects/Research/X-SAM/runs/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu1_mixed_finetune
+MASTER_PORT=29601 bash run.sh --modes segeval --config $CFG --work-dir $WORK
+
+# VLM benchmarks（會先 pth->HF 再評測）
+bash run.sh --modes vlmeval --config $CFG --work-dir $WORK
 
 """
