@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import math
 import os.path as osp
@@ -72,6 +73,8 @@ class XSamModel(BaseModel):
         freeze_llm=False,
         freeze_visual_encoder=False,
         freeze_segmentor_encoder=False,
+        freeze_segmentor_trunk=None,
+        freeze_segmentor_fpn=None,
         freeze_segmentor_connector=False,
         visual_select_layer=-2,
         visual_select_indx=0,  # 1 for clip, 0 for siglip
@@ -103,7 +106,19 @@ class XSamModel(BaseModel):
         super().__init__()
         self.freeze_llm = freeze_llm
         self.freeze_visual_encoder = freeze_visual_encoder
-        self.freeze_segmentor_encoder = freeze_segmentor_encoder
+        if freeze_segmentor_trunk is None and freeze_segmentor_fpn is None:
+            freeze_segmentor_trunk = freeze_segmentor_encoder
+            freeze_segmentor_fpn = freeze_segmentor_encoder
+        else:
+            if freeze_segmentor_trunk is None:
+                freeze_segmentor_trunk = freeze_segmentor_encoder
+            if freeze_segmentor_fpn is None:
+                freeze_segmentor_fpn = freeze_segmentor_encoder
+
+        self.freeze_segmentor_trunk = bool(freeze_segmentor_trunk)
+        self.freeze_segmentor_fpn = bool(freeze_segmentor_fpn)
+        # Backward-compatible aggregate flag: true only when both trunk/fpn are frozen.
+        self.freeze_segmentor_encoder = bool(self.freeze_segmentor_trunk and self.freeze_segmentor_fpn)
         self.freeze_segmentor_connector = freeze_segmentor_connector
 
         assert (
@@ -179,8 +194,8 @@ class XSamModel(BaseModel):
             self.llm.requires_grad_(False)
         if self.freeze_visual_encoder and self.visual_encoder is not None:
             self.visual_encoder.requires_grad_(False)
-        if self.freeze_segmentor_encoder and self.segmentor is not None:
-            self.segmentor.encoder.requires_grad_(False)
+        if self.segmentor is not None:
+            self._set_segmentor_encoder_trainability()
         if self.freeze_segmentor_connector and self.segmentor is not None:
             self.seg_connector.requires_grad_(False)
 
@@ -219,34 +234,19 @@ class XSamModel(BaseModel):
         self.use_visual_encoder_lora = visual_encoder_lora is not None
         self.use_segmentor_encoder_lora = segmentor_lora is not None
 
-        state_dict = super().state_dict()
         if s1_pretrained_pth is not None:
             pretrained_state_dict = guess_load_checkpoint(s1_pretrained_pth)
-            self.load_state_dict(pretrained_state_dict, strict=False)
-
-            matched_keys = [k for k in pretrained_state_dict.keys() if k in state_dict.keys()]
-            mismatched_keys = [k for k in pretrained_state_dict.keys() if k not in state_dict.keys()]
-            missed_keys = [k for k in state_dict.keys() if k not in pretrained_state_dict.keys()]
-            print_log(f"Load s1_pretrained_pth from {s1_pretrained_pth}", logger="current")
-            print_log(f"Matched keys: {len(matched_keys)} / {len(pretrained_state_dict.keys())}", logger="current")
-            if len(mismatched_keys) > 0:
-                print_log(f"Mismatched keys: {mismatched_keys}", logger="current", level=logging.WARNING)
-            if len(missed_keys) > 0:
-                print_log(f"Missed keys: {missed_keys}", logger="current", level=logging.WARNING)
+            self._load_checkpoint_shape_safe(
+                pretrained_state_dict=pretrained_state_dict,
+                ckpt_tag=f"s1_pretrained_pth from {s1_pretrained_pth}",
+            )
 
         if s2_pretrained_pth is not None:
             pretrained_state_dict = guess_load_checkpoint(s2_pretrained_pth)
-            self.load_state_dict(pretrained_state_dict, strict=False)
-
-            matched_keys = [k for k in pretrained_state_dict.keys() if k in state_dict.keys()]
-            mismatched_keys = [k for k in pretrained_state_dict.keys() if k not in state_dict.keys()]
-            missed_keys = [k for k in state_dict.keys() if k not in pretrained_state_dict.keys()]
-            print_log(f"Load s2_pretrained_pth from {s2_pretrained_pth}", logger="current")
-            print_log(f"Matched keys: {len(matched_keys)} / {len(pretrained_state_dict.keys())}", logger="current")
-            if len(mismatched_keys) > 0:
-                print_log(f"Mismatched keys: {mismatched_keys}", logger="current", level=logging.WARNING)
-            if len(missed_keys) > 0:
-                print_log(f"Missed keys: {missed_keys}", logger="current", level=logging.WARNING)
+            self._load_checkpoint_shape_safe(
+                pretrained_state_dict=pretrained_state_dict,
+                ckpt_tag=f"s2_pretrained_pth from {s2_pretrained_pth}",
+            )
 
         if visual_encoder_pretrained_pth is not None:
             self._load_partial_pretrained(
@@ -290,6 +290,43 @@ class XSamModel(BaseModel):
         self.llm_loss_weight = llm_loss_weight
         self.seg_loss_weight = seg_loss_weight
 
+    def _set_segmentor_encoder_trainability(self):
+        """Set trainability for segmentor encoder submodules.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+        """
+        if self.segmentor is None or self.segmentor.encoder is None:
+            return
+
+        if self.freeze_segmentor_encoder:
+            self.segmentor.encoder.requires_grad_(False)
+            return
+
+        if not (self.freeze_segmentor_trunk or self.freeze_segmentor_fpn):
+            return
+
+        if hasattr(self.segmentor.encoder, "vision_backbone"):
+            vision_backbone = self.segmentor.encoder.vision_backbone
+            if hasattr(vision_backbone, "trunk"):
+                vision_backbone.trunk.requires_grad_(not self.freeze_segmentor_trunk)
+            if hasattr(vision_backbone, "convs"):
+                vision_backbone.convs.requires_grad_(not self.freeze_segmentor_fpn)
+            if hasattr(vision_backbone, "sam2_convs") and vision_backbone.sam2_convs is not None:
+                vision_backbone.sam2_convs.requires_grad_(not self.freeze_segmentor_fpn)
+            return
+
+        print_log(
+            "Segmentor encoder has no `vision_backbone`; partial freeze flags fallback to whole-encoder behavior.",
+            logger="current",
+            level=logging.WARNING,
+        )
+        if self.freeze_segmentor_trunk and self.freeze_segmentor_fpn:
+            self.segmentor.encoder.requires_grad_(False)
+
     @property
     def device(self):
         return get_device()
@@ -300,6 +337,63 @@ class XSamModel(BaseModel):
         `torch.dtype`: The dtype of the module (assuming that all the module parameters have the same dtype).
         """
         return get_parameter_dtype(self)
+
+    def _load_checkpoint_shape_safe(self, pretrained_state_dict: Dict[str, torch.Tensor], ckpt_tag: str) -> None:
+        """Load checkpoint keys only when both key and shape match.
+
+        Args:
+            pretrained_state_dict: Loaded checkpoint state dict.
+            ckpt_tag: Human-readable tag shown in logs.
+        Returns:
+            None.
+        """
+        model_state_dict = super().state_dict()
+        filtered_state_dict = {}
+        unexpected_keys = []
+        shape_mismatched_keys = []
+
+        for key, value in pretrained_state_dict.items():
+            if key not in model_state_dict:
+                unexpected_keys.append(key)
+                continue
+            if model_state_dict[key].shape != value.shape:
+                shape_mismatched_keys.append(key)
+                continue
+            filtered_state_dict[key] = value
+
+        self.load_state_dict(filtered_state_dict, strict=False)
+
+        matched_keys = list(filtered_state_dict.keys())
+        missed_keys = [k for k in model_state_dict.keys() if k not in filtered_state_dict]
+        print_log(f"Load {ckpt_tag}", logger="current")
+        print_log(
+            f"Matched keys: {len(matched_keys)} / {len(pretrained_state_dict.keys())}",
+            logger="current",
+        )
+        if len(unexpected_keys) > 0:
+            preview = unexpected_keys[:20]
+            suffix = " ..." if len(unexpected_keys) > 20 else ""
+            print_log(
+                f"Unexpected keys ({len(unexpected_keys)}): {preview}{suffix}",
+                logger="current",
+                level=logging.WARNING,
+            )
+        if len(shape_mismatched_keys) > 0:
+            preview = shape_mismatched_keys[:20]
+            suffix = " ..." if len(shape_mismatched_keys) > 20 else ""
+            print_log(
+                f"Shape-mismatched keys ({len(shape_mismatched_keys)}): {preview}{suffix}",
+                logger="current",
+                level=logging.WARNING,
+            )
+        if len(missed_keys) > 0:
+            preview = missed_keys[:20]
+            suffix = " ..." if len(missed_keys) > 20 else ""
+            print_log(
+                f"Missed keys ({len(missed_keys)}): {preview}{suffix}",
+                logger="current",
+                level=logging.WARNING,
+            )
 
     def _extract_state_by_prefixes(
         self,
@@ -573,11 +667,30 @@ class XSamModel(BaseModel):
 
         if "extra_pixel_values" in data_dict and self.segmentor is not None:
             if self.extract_seg_embeds:
-                seg_visual_outputs = self.segmentor.encoder(
-                    data_dict["extra_pixel_values"].to(self.segmentor.dtype),
+                seg_encoder_kwargs = dict(
                     output_hidden_states=True,
                     output_attentions=False,
                 )
+                if not self.freeze_segmentor_encoder:
+                    seg_encoder_kwargs.update(
+                        freeze_trunk=self.freeze_segmentor_trunk,
+                        freeze_fpn=self.freeze_segmentor_fpn,
+                    )
+
+                encoder_context = torch.no_grad if self.freeze_segmentor_encoder else contextlib.nullcontext
+                with encoder_context():
+                    try:
+                        seg_visual_outputs = self.segmentor.encoder(
+                            data_dict["extra_pixel_values"].to(self.segmentor.dtype),
+                            **seg_encoder_kwargs,
+                        )
+                    except TypeError:
+                        seg_encoder_kwargs.pop("freeze_trunk", None)
+                        seg_encoder_kwargs.pop("freeze_fpn", None)
+                        seg_visual_outputs = self.segmentor.encoder(
+                            data_dict["extra_pixel_values"].to(self.segmentor.dtype),
+                            **seg_encoder_kwargs,
+                        )
                 # SAM2 HF vision encoder returns fpn_hidden_states (C,H,W) with C=fpn_hidden_size
                 seg_image_embeddings = (
                     seg_visual_outputs.fpn_hidden_states

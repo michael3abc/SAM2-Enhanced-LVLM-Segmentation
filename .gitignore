@@ -1,5 +1,6 @@
 .venv/
 AGENTS.md
+.gradio
 
 runs/
 /data/
@@ -16,3 +17,4 @@ __pycache__/
 *.pth
 *.bin
 *.npy
+

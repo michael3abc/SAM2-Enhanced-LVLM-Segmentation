@@ -188,7 +188,7 @@ validators==0.35.0
 wcwidth==0.6.0
 websockets==16.0
 xlsxwriter==3.2.9
-xtuner==0.2.0
+# xtuner==0.2.0
 xxhash==3.6.0
 yapf==0.43.0
 yarl==1.22.0

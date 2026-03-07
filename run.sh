@@ -107,6 +107,7 @@ modes=()
 config_file=""
 suffix=""
 segeval_resume=0
+sweep_args=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -139,15 +140,20 @@ while [[ $# -gt 0 ]]; do
         --resume)
             segeval_resume=1
             ;;
+        --sweep-args)
+            shift
+            sweep_args="$1"
+            ;;
         --help|-h)
             echo "Usage: $0 [--modes MODE1,MODE2,...] --config CONFIG_FILE [--work-dir WORK_DIR] [--suffix SUFFIX] [--resume] [--help]"
-            echo "Available modes: train, segeval, vlmeval, visualize, demo"
+            echo "Available modes: train, segeval, vlmeval, visualize, demo, sweep"
             echo "Arguments:"
             echo "  --modes, -m          Specify modes to run (comma-separated or space-separated)"
             echo "  --config, -c         Specify config file path (REQUIRED)"
             echo "  --work-dir, -w       Specify work directory path (optional)"
             echo "  --suffix, -s         Specify suffix for work directory (optional)"
             echo "  --resume             Enable segeval resume (skip datasets with complete predictions)"
+            echo "  --sweep-args         Extra args passed to sweep_L_spatial.py (quoted string)"
             echo "  --help, -h           Show this help message"
             echo "Examples:"
             echo "  $0 --config path/to/config.py                    # Run all modes with specified config"
@@ -157,6 +163,7 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 --config config.py --suffix test             # Run with suffix 'test'"
             echo "  $0 --config config.py --modes segeval --resume  # Resume segmentation evaluation"
             echo "  $0 --config config.py --modes demo --work-dir /path/to/work  # Launch local Gradio demo (requires checkpoint in work-dir)"
+            echo "  $0 --config config.py --modes sweep --sweep-args \"--layers -1,-2 --train-epochs 1 --train-ratio 0.05\""
             exit 0
             ;;
         *)
@@ -217,7 +224,7 @@ work_dir="$(realpath -m "$work_dir")"
 ckpt_file="$work_dir/pytorch_model.bin"
 
 # Validate modes
-valid_modes=("train" "segeval" "vlmeval" "visualize" "demo")
+valid_modes=("train" "segeval" "vlmeval" "visualize" "demo" "sweep")
 for mode in "${modes[@]}"; do
     valid=0
     for valid_mode in "${valid_modes[@]}"; do
@@ -311,6 +318,16 @@ do
     trained_flag=0
     if [ $mode = "train" ]; then
         echo -e "$log_format Training $model_name."
+        # Preflight config parse to fail fast on syntax/config errors before torchrun spawn.
+        if ! PYTHONPATH="$(realpath "$code_dir")":$PYTHONPATH "$python_cmd" - <<PY
+from mmengine.config import Config
+Config.fromfile("$config_file")
+print("Config preflight ok:", "$config_file")
+PY
+        then
+            echo -e "$log_format Config preflight failed: $config_file"
+            exit 1
+        fi
         PYTHONPATH="$(realpath $code_dir)":$PYTHONPATH OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
             "${torchrun_cmd[@]}" --master_addr=$master_addr --master_port=$master_port --nproc_per_node=$gpu_per_node \
             $code_dir/xsam/tools/train.py \
@@ -320,6 +337,38 @@ do
             --launcher pytorch \
             --deepspeed $deepspeed_cfg \
             --seed 1024 | { [ $node_rank = "0" ] && tee $work_dir/${mode}-${time}.log || cat; }
+    fi
+    # mode: sweep
+    if [ $mode = "sweep" ]; then
+        echo -e "$log_format Sweeping spatial probe layers: $model_name."
+        if [ "$node_rank" = "0" ]; then
+            mkdir -p "$work_dir"
+        fi
+        sweep_script="$root_dir/external/sam3/layer_analysis/sweep_L_spatial.py"
+        sweep_config="$source_cfg_abs"
+        [ -f "$sweep_config" ] || sweep_config="$config_file"
+        [ -f "$sweep_config" ] || sweep_config="$root_dir/$config_file"
+        sweep_cmd=("$python_cmd" "$sweep_script" "--config" "$sweep_config")
+        if [[ -n "$sweep_args" ]]; then
+            read -r -a sweep_args_arr <<< "$sweep_args"
+            normalized_sweep_args=()
+            idx=0
+            while [ $idx -lt ${#sweep_args_arr[@]} ]; do
+                token="${sweep_args_arr[$idx]}"
+                next_idx=$((idx + 1))
+                if [[ "$token" == "--layers" && $next_idx -lt ${#sweep_args_arr[@]} ]]; then
+                    layer_value="${sweep_args_arr[$next_idx]}"
+                    normalized_sweep_args+=("--layers=$layer_value")
+                    idx=$((idx + 2))
+                    continue
+                fi
+                normalized_sweep_args+=("$token")
+                idx=$((idx + 1))
+            done
+            sweep_cmd+=("${normalized_sweep_args[@]}")
+        fi
+        PYTHONPATH="$(realpath $code_dir)":$PYTHONPATH OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+            "${sweep_cmd[@]}" | { [ $node_rank = "0" ] && tee $work_dir/${mode}-${time}.log || cat; }
     fi
     # Check if training completed successfully
     if [ -f $ckpt_file ]; then

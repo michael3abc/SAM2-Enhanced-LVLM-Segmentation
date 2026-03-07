@@ -1,0 +1,48 @@
+name: xsam
+
+services:
+  dev:
+    build:
+      context: ${HOST_WORKSPACE:-..}
+      dockerfile: docker/Dockerfile
+      args:
+        HF_HOME: ${CONTAINER_HF_HOME:-/workspace/inits/huggingface}
+        FLASH_ATTN_WHEEL_URL: ${FLASH_ATTN_WHEEL_URL:-https://drive.google.com/file/d/1Y87ikQEC8yQOFUxCVoERGPuQd7MYNwfj/view?usp=sharing}
+        FLASH_ATTN_WHEEL_NAME: ${FLASH_ATTN_WHEEL_NAME:-flash_attn-2.8.3-cp310-cp310-linux_x86_64.whl}
+        FLASH_ATTN_WHEEL_SHA256: ${FLASH_ATTN_WHEEL_SHA256:-91571f68f4113065dba4464a0d8d911f9e27969f139a6851c46668e06c2ac5f7}
+    image: ${IMAGE_NAME:-xsam:cuda12.8-py310}
+    container_name: ${DEV_CONTAINER_NAME:-xsam-dev}
+    working_dir: /workspace
+    gpus: all
+    ipc: host
+    shm_size: ${SHM_SIZE:-32g}
+    ulimits:
+      nofile:
+        soft: ${ULIMIT_NOFILE_SOFT:-1048576}
+        hard: ${ULIMIT_NOFILE_HARD:-1048576}
+      memlock:
+        soft: ${ULIMIT_MEMLOCK_SOFT:--1}
+        hard: ${ULIMIT_MEMLOCK_HARD:--1}
+      stack:
+        soft: ${ULIMIT_STACK_SOFT:-67108864}
+        hard: ${ULIMIT_STACK_HARD:-67108864}
+    tty: true
+    stdin_open: true
+    environment:
+      INSIDE_DOCKER: "1"
+      VENV_DIR: /opt/venv
+      CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
+      GPU_PER_NODE: ${GPU_PER_NODE:-1}
+      MASTER_ADDR: ${MASTER_ADDR:-127.0.0.1}
+      MASTER_PORT: ${MASTER_PORT:-29500}
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
+      TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-0}
+      HF_HOME: ${CONTAINER_HF_HOME:-/workspace/inits/huggingface}
+      PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.8}
+    volumes:
+      - ${HOST_WORKSPACE:-..}:/workspace
+      - ${HOST_DATA_DIR:-../data}:/workspace/data
+      - ${HOST_INITS_DIR:-../inits}:/workspace/inits
+      - ${HOST_RUNS_DIR:-../runs}:/workspace/runs
+      - ${HOST_HF_HOME}:${CONTAINER_HF_HOME}
+    command: bash

@@ -1,0 +1,16 @@
+.git
+.venv
+__pycache__
+*.pyc
+data
+outputs
+checkpoints
+wandb
+inits
+runs
+docker/.env
+docker/wheels
+external/sam2/notebooks
+external/sam2/demo/data
+external/sam3/assets
+external/sam3/examples

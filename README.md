@@ -1,197 +1,143 @@
-# X-SAM CLI 快速手冊（Train / Eval / Demo）
+# SAM Enhanced LVLM Segmentation
 
-這份文件只講你每天會用到的 CLI。
+## Overview
+This repository extends [X-SAM](https://github.com/wanghao9610/X-SAM) with a reproducible, research-oriented framework for SAM-enhanced LVLM segmentation.
 
-## 0) 先決條件
+Key enhancements over the original X-SAM implementation include:
 
-專案根目錄假設為：
+- **SAM2/SAM3 support**: unified integration of SAM2 and SAM3 backbones within the X-SAM training and evaluation stack.
+- **Training-oriented execution pipeline**: standardized entry scripts (`run.sh`, `run_docker.sh`), improved resume semantics, and robust defaults for long-running experiments.
+- **Layer-wise best-layer search**: a dedicated SAM3 probing workflow (`sweep_L_spatial.py`) that trains per-layer probe heads and performs empirical layer selection.
+- **Containerized reproducibility**: Docker-based environment management with pinned dependencies, GPU runtime configuration, and explicit Hugging Face cache mapping.
 
-```bash
-cd /home/michael/projects/Research/X-SAM
-```
+## 1. Prerequisites
 
-`run.sh` 會優先找 `.venv/bin/python`，建議先確認：
+- Linux host
+- NVIDIA driver installed on host
+- Docker + Docker Compose plugin
+- NVIDIA Container Toolkit (for `gpus: all`)
 
-```bash
-test -x .venv/bin/python && echo "venv ok" || echo "venv missing"
-```
-
----
-
-## 1) 一句話總覽
-
-```bash
-bash run.sh --modes <train|segeval|demo> --config <config.py> [--work-dir <dir>] [--suffix <tag>]
-```
-
-`--config` 是必要參數。  
-`--modes` 可單個或逗號串接，例如 `train,segeval`。  
-`--work-dir` 不給就自動用 `runs/<stage>/<model_name>`。
-
----
-
-## 2) Train
-
-### 2.1 單純訓練
+## 2. Clone and Configure
 
 ```bash
-CFG=xsam/xsam/configs/xsam/s3_mixed_finetune/sam2/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu2_mixed_finetune.py
+git clone https://github.com/michael3abc/SAM-Enhanced-LVLM-Segmentation.git
+cd SAM-Enhanced-LVLM-Segmentation
 
-CUDA_VISIBLE_DEVICES=0,1 \
-GPU_PER_NODE=2 \
-bash run.sh --modes train --config "$CFG"
+cp docker/.env.example docker/.env
 ```
 
-### 2.2 指定輸出資料夾
+Edit `docker/.env`:
+
+- Set `HOST_HF_HOME` to your host cache path (example: `/home/<user>/.cache/huggingface`).
+- Set `CONTAINER_HF_HOME` to the same absolute path unless you have a specific reason to change it.
+- Adjust GPU and runtime fields if needed:
+  - `CUDA_VISIBLE_DEVICES`
+  - `GPU_PER_NODE`
+  - `MASTER_PORT`
+  - `SHM_SIZE`
+
+## 3. Build Docker Environment
+
+Build once (or after dependency/image changes):
 
 ```bash
-CFG=xsam/xsam/configs/xsam/s3_mixed_finetune/sam2/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu2_mixed_finetune.py
-WORK=runs/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu2_mixed_finetune_v2
-
-CUDA_VISIBLE_DEVICES=0,1 \
-GPU_PER_NODE=2 \
-bash run.sh --modes train --config "$CFG" --work-dir "$WORK"
+bash run_docker.sh --build \
+  --modes sweep \
+  --config xsam/xsam/configs/xsam/layer_analysis/xsam_sam3_spatial.py
 ```
 
-### 2.3 常用訓練環境變數
+Notes:
 
-- `CUDA_VISIBLE_DEVICES=0,1`：選 GPU。
-- `GPU_PER_NODE=2`：`torchrun --nproc_per_node`。
-- `MASTER_PORT=29601`：多次開不同 job 時避免 port 衝突。
-- `DEEPSPEED_CFG=deepspeed_zero2|deepspeed_zero3|deepspeed_zero2_offload`：覆蓋 run.sh 預設。
+- The build installs dependencies inside `/opt/venv`.
+- `flash_attn` is downloaded from `FLASH_ATTN_WHEEL_URL` in `docker/.env` and verified by `FLASH_ATTN_WHEEL_SHA256`.
 
----
+## 4. Data and Model Layout
 
-## 3) Eval（Segmentation）
+Host directories are mounted into the container by `docker/compose.yaml`:
 
-### 3.1 用 `run.sh` 跑完整 segeval（建議）
+- `../data` -> `/workspace/data`
+- `../inits` -> `/workspace/inits`
+- `../runs` -> `/workspace/runs`
+- `HOST_HF_HOME` -> `CONTAINER_HF_HOME`
+
+Expected core layout:
+
+```text
+data/
+inits/
+runs/
+```
+
+If you need to download datasets from inside Docker:
 
 ```bash
-CFG=xsam/xsam/configs/xsam/s3_mixed_finetune/sam2/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu2_mixed_finetune.py
-WORK=runs/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu2_mixed_finetune_v2
-
-CUDA_VISIBLE_DEVICES=0,1 \
-GPU_PER_NODE=2 \
-MASTER_PORT=29601 \
-bash run.sh --modes segeval --config "$CFG" --work-dir "$WORK" --resume
+docker compose -f docker/compose.yaml --env-file docker/.env run --rm dev \
+  python scripts/dataset/datasets_preparing.py \
+    --mode download \
+    --root-dir . \
+    --threads 8
 ```
 
-### 3.2 直接呼叫 `eval.py`（只評特定 dataset）
+## 5. Run Training/Eval/Sweep with Docker
+
+Use `run_docker.sh` from host. It forwards arguments to in-container `run.sh`.
+
+### 5.1 Layer Sweep
 
 ```bash
-CFG=xsam/xsam/configs/xsam/s3_mixed_finetune/sam2/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu2_mixed_finetune.py
-WORK=runs/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu2_mixed_finetune_v2
-
-CUDA_VISIBLE_DEVICES=0 \
-.venv/bin/torchrun --nproc_per_node=1 \
-  xsam/xsam/tools/eval.py "$CFG" \
-  --launcher pytorch \
-  --work-dir "$WORK" \
-  --pth_model latest \
-  --data-names point_intseg box_intseg
+CUDA_VISIBLE_DEVICES=0 GPU_PER_NODE=1 \
+bash run_docker.sh \
+  --modes sweep \
+  --config xsam/xsam/configs/xsam/layer_analysis/xsam_sam3_spatial.py
 ```
 
-### 3.3 輸出結果位置
-
-- 預測檔：`$WORK/pred_data/<dataset_name>/...`
-- 聚合 CSV：`$WORK/pred_data/results.csv`（每個 dataset 一筆）
-- log：`$WORK/segeval-<timestamp>.log`
-
----
-
-## 4) Demo（推論）
-
-你有兩種方式：單張/資料夾 CLI，或 Gradio。
-
-### 4.1 單張或資料夾 CLI 推論（`demo.py`）
+### 5.2 Train (Example: Stage 1)
 
 ```bash
-CFG=xsam/xsam/configs/xsam/s3_mixed_finetune/sam2/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu2_mixed_finetune.py
-WORK=runs/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu2_mixed_finetune_v2
-CKPT=$WORK/pytorch_model.bin
-
-CUDA_VISIBLE_DEVICES=0 \
-.venv/bin/python xsam/xsam/demo/demo.py "$CFG" \
-  --pth_model "$CKPT" \
-  --image xsam/xsam/demo/images/genseg.jpg \
-  --prompt "ins: person, bird, boat; sem: water, sky" \
-  --task_name genseg \
-  --output_dir "$WORK/demo_out"
+CUDA_VISIBLE_DEVICES=0,1 GPU_PER_NODE=2 \
+bash run_docker.sh \
+  --modes train \
+  --config xsam/xsam/configs/xsam/s1_seg_finetune/sam3/xsam_sam3_1008_e12_gpu2_seg_finetune.py
 ```
 
-常見 `task_name`：
-
-- `imgconv`
-- `genseg`
-- `refseg`
-- `reaseg`
-- `gcgseg`
-- `intseg`
-- `vgdseg`
-
-### 4.2 啟動 Gradio Demo（`app.py`）
-
-```bash
-CFG=xsam/xsam/configs/xsam/s3_mixed_finetune/sam2/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu2_mixed_finetune.py
-WORK=runs/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu2_mixed_finetune_v2
-
-CUDA_VISIBLE_DEVICES=0 \
-GPU_PER_NODE=1 \
-bash run.sh --modes demo --config "$CFG" --work-dir "$WORK"
-```
-
-預設 port 在 `run.sh` 是 `7862`。
-
----
-
-## 5) Batch Size / Device 要在哪裡調
-
-### 5.1 Device
-
-最直接就是環境變數：
-
-```bash
-CUDA_VISIBLE_DEVICES=0
-GPU_PER_NODE=1
-```
-
-### 5.2 Batch Size
-
-- `train`：看 config 裡的 `train_dataloader.batch_size`。
-- `eval.py`：目前程式內固定 `batch_size=1`。
-- `demo.py`：單筆推論流程（不是 batched dataloader）。
-- `visualize.py`：有 `--batch-size` 可調。
-
----
-
-## 6) 常見工作流
-
-### 6.1 Train -> Eval
+### 5.3 Segmentation Eval
 
 ```bash
 CFG=xsam/xsam/configs/xsam/s3_mixed_finetune/sam2/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu2_mixed_finetune.py
 WORK=runs/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu2_mixed_finetune_v2
 
 CUDA_VISIBLE_DEVICES=0,1 GPU_PER_NODE=2 MASTER_PORT=29601 \
-bash run.sh --modes train,segeval --config "$CFG" --work-dir "$WORK"
+bash run_docker.sh \
+  --modes segeval \
+  --config "$CFG" \
+  --work-dir "$WORK" \
+  --resume
 ```
 
-### 6.2 只用現成 checkpoint 做 Demo
+### 5.4 Demo
 
 ```bash
 CFG=xsam/xsam/configs/xsam/s3_mixed_finetune/sam2/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu2_mixed_finetune.py
 WORK=runs/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu2_mixed_finetune_v2
 
-CUDA_VISIBLE_DEVICES=0 \
-bash run.sh --modes demo --config "$CFG" --work-dir "$WORK"
+CUDA_VISIBLE_DEVICES=0 GPU_PER_NODE=1 \
+bash run_docker.sh \
+  --modes demo \
+  --config "$CFG" \
+  --work-dir "$WORK"
 ```
 
----
+## 6. Direct Docker Compose Usage (Optional)
 
-## 7) 快速除錯
+If you do not want the wrapper script:
 
-- checkpoint 不存在：先確認 `"$WORK/pytorch_model.bin"`。
-- `--pth_model latest` 找不到：`--work-dir` 要對。
-- NCCL 卡住：先單卡測（`CUDA_VISIBLE_DEVICES=0 GPU_PER_NODE=1`）。
-- port 衝突：換 `MASTER_PORT`。
-- OOM：先降 GPU 數外的 batch/輸入大小，再考慮切 ZeRO。
+```bash
+docker compose -f docker/compose.yaml --env-file docker/.env build dev
+docker compose -f docker/compose.yaml --env-file docker/.env run --rm dev bash
+```
+
+Inside the container:
+
+```bash
+bash run.sh --help
+```

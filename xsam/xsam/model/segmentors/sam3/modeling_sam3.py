@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib
+import os
 import sys
 import types
 from collections import OrderedDict
@@ -20,17 +22,34 @@ from .configuration_sam3 import Sam3Config, Sam3PromptEncoderConfig, Sam3VisionC
 logger = logging.get_logger(__name__)
 
 
-def _find_repo_root(start_path: Path) -> Optional[Path]:
-    """Find repository root by searching for `.git` directory.
+def _resolve_external_sam3_dir(start_path: Path) -> Optional[Path]:
+    """Resolve the `external/sam3` directory from multiple runtime hints.
 
     Args:
         start_path: Current file path.
     Returns:
-        Repository root path when found, otherwise None.
+        Path to `external/sam3` when found, otherwise None.
     """
-    for parent in [start_path, *start_path.parents]:
-        if (parent / ".git").exists():
-            return parent
+    candidate_bases: list[Path] = []
+    env_root = os.environ.get("ROOT_DIR", None)
+    env_code = os.environ.get("CODE_DIR", None)
+
+    if env_root:
+        candidate_bases.append(Path(env_root).resolve())
+    if env_code:
+        code_dir = Path(env_code).resolve()
+        candidate_bases.extend([code_dir, code_dir.parent])
+
+    candidate_bases.extend([Path.cwd().resolve(), start_path, *start_path.parents])
+
+    seen = set()
+    for base in candidate_bases:
+        if base in seen:
+            continue
+        seen.add(base)
+        for external_dir in (base / "external" / "sam3", base.parent / "external" / "sam3"):
+            if external_dir.exists():
+                return external_dir.resolve()
     return None
 
 
@@ -42,16 +61,13 @@ def _ensure_external_sam3_in_path() -> None:
     Returns:
         None.
     """
-    current = Path(__file__).resolve()
-    root = _find_repo_root(current)
-    if root is None:
+    external_sam3 = _resolve_external_sam3_dir(Path(__file__).resolve())
+    if external_sam3 is None:
         return
 
-    external_sam3 = root / "external" / "sam3"
-    if external_sam3.exists():
-        ext_path = str(external_sam3)
-        if ext_path not in sys.path:
-            sys.path.insert(0, ext_path)
+    ext_path = str(external_sam3)
+    if ext_path not in sys.path:
+        sys.path.insert(0, ext_path)
 
 
 def _import_sam3_backbone_modules():
@@ -70,12 +86,11 @@ def _import_sam3_backbone_modules():
     except Exception:
         # Fallback: avoid executing external `sam3/__init__.py` when optional deps
         # (e.g. pkg_resources from setuptools) are missing in runtime env.
-        current = Path(__file__).resolve()
-        root = _find_repo_root(current)
-        if root is None:
+        external_sam3 = _resolve_external_sam3_dir(Path(__file__).resolve())
+        if external_sam3 is None:
             raise
 
-        sam3_pkg_root = root / "external" / "sam3" / "sam3"
+        sam3_pkg_root = external_sam3 / "sam3"
         sam3_model_root = sam3_pkg_root / "model"
         if not sam3_model_root.exists():
             raise
@@ -320,6 +335,8 @@ class Sam3VisionModel(Sam3PreTrainedModel):
         pixel_values: torch.FloatTensor | None = None,
         output_hidden_states: bool = False,
         output_attentions: bool = False,
+        freeze_trunk: bool = False,
+        freeze_fpn: bool = False,
         output_trunk_hidden_states: bool = False,
         trunk_select_layers: Optional[Tuple[int, ...] | list[int]] = None,
         return_dict: bool = True,
@@ -331,6 +348,9 @@ class Sam3VisionModel(Sam3PreTrainedModel):
             pixel_values: Input image tensor `[B, 3, H, W]`.
             output_hidden_states: Whether to return hidden states.
             output_attentions: Unused, kept for API compatibility.
+            freeze_trunk: Run trunk forward in ``torch.no_grad()``.
+            freeze_fpn: Freeze FPN parameters hint. ``torch.no_grad()`` is only
+                applied when both trunk and FPN are frozen.
             output_trunk_hidden_states: Whether to return selected trunk block outputs.
             trunk_select_layers: Trunk block indexes to capture, supports negative indexing.
             return_dict: Whether to return model output dataclass.
@@ -386,7 +406,33 @@ class Sam3VisionModel(Sam3PreTrainedModel):
                 hooks.append(self.vision_backbone.trunk.blocks[layer_id].register_forward_hook(make_hook(layer_id)))
 
         try:
-            sam3_features, sam3_pos, sam2_features, sam2_pos = self.vision_backbone(pixel_values)
+            if not freeze_trunk and not freeze_fpn:
+                sam3_features, sam3_pos, sam2_features, sam2_pos = self.vision_backbone(pixel_values)
+            else:
+                trunk_context = torch.no_grad if freeze_trunk else contextlib.nullcontext
+                fpn_context = torch.no_grad if (freeze_trunk and freeze_fpn) else contextlib.nullcontext
+
+                with trunk_context():
+                    trunk_features = self.vision_backbone.trunk(pixel_values)
+                x = trunk_features[-1]
+
+                sam3_features, sam3_pos = [], []
+                sam2_features, sam2_pos = None, None
+                if self.vision_backbone.sam2_convs is not None:
+                    sam2_features, sam2_pos = [], []
+
+                with fpn_context():
+                    for i in range(len(self.vision_backbone.convs)):
+                        sam3_x_out = self.vision_backbone.convs[i](x)
+                        sam3_pos_out = self.vision_backbone.position_encoding(sam3_x_out).to(sam3_x_out.dtype)
+                        sam3_features.append(sam3_x_out)
+                        sam3_pos.append(sam3_pos_out)
+
+                        if self.vision_backbone.sam2_convs is not None:
+                            sam2_x_out = self.vision_backbone.sam2_convs[i](x)
+                            sam2_pos_out = self.vision_backbone.position_encoding(sam2_x_out).to(sam2_x_out.dtype)
+                            sam2_features.append(sam2_x_out)
+                            sam2_pos.append(sam2_pos_out)
         finally:
             for hook in hooks:
                 hook.remove()

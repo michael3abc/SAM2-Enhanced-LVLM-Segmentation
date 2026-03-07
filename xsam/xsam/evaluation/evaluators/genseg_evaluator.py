@@ -100,10 +100,11 @@ class GenSegEvaluator(BaseEvaluator):
         """
         json_list = []
         for label in np.unique(sem_seg):
+            label = int(label)
             if self._contiguous_id_to_dataset_id is not None:
-                assert (
-                    label in self._contiguous_id_to_dataset_id
-                ), "Label {} is not in the metadata info for {}".format(label, self._dataset_name)
+                if label not in self._contiguous_id_to_dataset_id:
+                    # Skip ignore/invalid labels when exporting prediction json.
+                    continue
                 dataset_id = self._contiguous_id_to_dataset_id[label]
             else:
                 dataset_id = int(label)
@@ -117,6 +118,8 @@ class GenSegEvaluator(BaseEvaluator):
         gt_semseg_folder = osp.realpath(self._metadata.semseg_map_folder)
         semseg_sufix = self._metadata.semseg_sufix if hasattr(self._metadata, "semseg_sufix") else ".png"
         label_shift = self._metadata.label_shift if hasattr(self._metadata, "label_shift") else 0
+        dataset_to_contiguous = self._metadata.dataset_id_to_contiguous_id
+        ignore_label = self._metadata.ignore_label
         for input, output in zip(inputs, outputs):
             segmentation = output["segmentation"].to(self._cpu_device)
             sampled_labels = output["sampled_labels"]
@@ -128,10 +131,33 @@ class GenSegEvaluator(BaseEvaluator):
                     if sampled_labels is not None:
                         pred[pred == unique_label] = sampled_labels[unique_label] - label_shift
 
+            # Build one lookup table that supports both:
+            # 1) contiguous IDs (identity mapping),
+            # 2) dataset IDs (dataset_id_to_contiguous_id mapping).
+            max_dataset_id = max(int(max(dataset_to_contiguous.keys())), int(pred.max()))
+
             file_name = input["file_name"]
             file_name_semseg = os.path.splitext(file_name)[0] + semseg_sufix
             gt = np.array(Image.open(os.path.join(gt_semseg_folder, file_name_semseg)), dtype=np.uint32)
-            gt[gt == self._metadata.ignore_label] = self._num_classes
+            # Some COCO semantic maps are stored as 3-channel PNG with identical channels.
+            # Convert to single channel to align with ``pred`` shape [H, W].
+            if gt.ndim == 3:
+                gt = gt[..., 0]
+            max_dataset_id = max(max_dataset_id, int(gt.max()))
+            lut = np.full((max_dataset_id + 1,), self._num_classes, dtype=np.int64)
+            lut[: self._num_classes] = np.arange(self._num_classes, dtype=np.int64)
+            for dataset_id, contiguous_id in dataset_to_contiguous.items():
+                dataset_id = int(dataset_id)
+                if dataset_id <= max_dataset_id:
+                    lut[dataset_id] = int(contiguous_id)
+
+            pred_idx = np.clip(pred.astype(np.int64), 0, max_dataset_id)
+            pred = lut[pred_idx]
+
+            gt_int = gt.astype(np.int64)
+            gt_idx = np.clip(gt_int, 0, max_dataset_id)
+            gt = lut[gt_idx]
+            gt[gt_int == ignore_label] = self._num_classes
 
             self._conf_matrix += np.bincount(
                 (self._num_classes + 1) * pred.reshape(-1) + gt.reshape(-1),

@@ -1,3 +1,4 @@
+import contextlib
 import logging
 from typing import List, Optional
 
@@ -202,25 +203,34 @@ class XSam3Model(XSamModel):
             output_hidden_states=True,
             output_attentions=False,
         )
+        if not self.freeze_segmentor_encoder:
+            encoder_kwargs.update(
+                freeze_trunk=self.freeze_segmentor_trunk,
+                freeze_fpn=self.freeze_segmentor_fpn,
+            )
         if trunk_select_layers is not None and len(trunk_select_layers) > 0:
             encoder_kwargs["output_trunk_hidden_states"] = True
             encoder_kwargs["trunk_select_layers"] = tuple(trunk_select_layers)
 
-        try:
-            seg_visual_outputs = self.segmentor.encoder(**encoder_kwargs)
-        except TypeError:
-            # Backward compatibility for encoders that don't expose trunk capture args
-            # or use positional `pixel_values`.
-            encoder_kwargs.pop("output_trunk_hidden_states", None)
-            encoder_kwargs.pop("trunk_select_layers", None)
+        encoder_context = torch.no_grad if self.freeze_segmentor_encoder else contextlib.nullcontext
+        with encoder_context():
             try:
                 seg_visual_outputs = self.segmentor.encoder(**encoder_kwargs)
             except TypeError:
-                seg_visual_outputs = self.segmentor.encoder(
-                    encoder_kwargs.pop("pixel_values"),
-                    output_hidden_states=encoder_kwargs.get("output_hidden_states", True),
-                    output_attentions=encoder_kwargs.get("output_attentions", False),
-                )
+                # Backward compatibility for encoders that don't expose trunk capture args
+                # or use positional `pixel_values`.
+                encoder_kwargs.pop("freeze_trunk", None)
+                encoder_kwargs.pop("freeze_fpn", None)
+                encoder_kwargs.pop("output_trunk_hidden_states", None)
+                encoder_kwargs.pop("trunk_select_layers", None)
+                try:
+                    seg_visual_outputs = self.segmentor.encoder(**encoder_kwargs)
+                except TypeError:
+                    seg_visual_outputs = self.segmentor.encoder(
+                        encoder_kwargs.pop("pixel_values"),
+                        output_hidden_states=encoder_kwargs.get("output_hidden_states", True),
+                        output_attentions=encoder_kwargs.get("output_attentions", False),
+                    )
 
         if hasattr(seg_visual_outputs, "fpn_hidden_states"):
             seg_image_embeddings = seg_visual_outputs.fpn_hidden_states
