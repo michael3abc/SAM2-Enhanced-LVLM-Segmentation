@@ -52,13 +52,14 @@ export PATH="$venv_dir/bin:$PATH"
 code_name="xsam"
 code_dir="$root_dir/$code_name"
 src_code_dir="$code_dir"
-data_dir="$root_dir/data"
-init_dir="$root_dir/inits"
-work_dir="$root_dir/runs"
+data_dir="${DATA_DIR:-$root_dir/data}"
+init_dir="${INIT_DIR:-$root_dir/inits}"
+work_dir="${WORK_DIR:-$root_dir/runs}"
 export ROOT_DIR="$root_dir/"
 export DATA_DIR="$data_dir/"
 export INIT_DIR="$init_dir/"
 export WORK_DIR="$work_dir/"
+export ROOT_DIR="$root_dir/"
 export LMUData="$data_dir/LMUData"
 export HF_HOME="$init_dir/huggingface"
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
@@ -105,9 +106,13 @@ default_modes=("train" "segeval" "vlmeval" "visualize")
 # Parse command line arguments
 modes=()
 config_file=""
+profile_yaml=""
+profile_yaml_abs=""
+profile_name_suffix=""
 suffix=""
 segeval_resume=0
 sweep_args=""
+sweep_yaml=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -129,6 +134,10 @@ while [[ $# -gt 0 ]]; do
             shift
             config_file="$1"
             ;;
+        --yaml|-y)
+            shift
+            profile_yaml="$1"
+            ;;
         --suffix|-s)
             shift
             suffix="$1"
@@ -144,19 +153,26 @@ while [[ $# -gt 0 ]]; do
             shift
             sweep_args="$1"
             ;;
+        --sweep-yaml)
+            shift
+            sweep_yaml="$1"
+            ;;
         --help|-h)
-            echo "Usage: $0 [--modes MODE1,MODE2,...] --config CONFIG_FILE [--work-dir WORK_DIR] [--suffix SUFFIX] [--resume] [--help]"
-            echo "Available modes: train, segeval, vlmeval, visualize, demo, sweep"
+            echo "Usage: $0 [--modes MODE1,MODE2,...] --config CONFIG_FILE [--yaml PROFILE_YAML] [--work-dir WORK_DIR] [--suffix SUFFIX] [--resume] [--sweep-yaml YAML] [--sweep-args ARGS] [--help]"
+            echo "Available modes: train, segeval, vlmeval, visualize, demo, sweep, sweep_spatial, sweep_language"
             echo "Arguments:"
             echo "  --modes, -m          Specify modes to run (comma-separated or space-separated)"
-            echo "  --config, -c         Specify config file path (REQUIRED)"
+            echo "  --config, -c         Specify config file path (required except sweep_language-only runs)"
+            echo "  --yaml, -y           Specify profile YAML file (optional)"
             echo "  --work-dir, -w       Specify work directory path (optional)"
             echo "  --suffix, -s         Specify suffix for work directory (optional)"
             echo "  --resume             Enable segeval resume (skip datasets with complete predictions)"
-            echo "  --sweep-args         Extra args passed to sweep_L_spatial.py (quoted string)"
+            echo "  --sweep-yaml         Sweep YAML path (spatial/language; defaults to each mode's default YAML)"
+            echo "  --sweep-args         Extra args passed to sweep entry script (quoted string)"
             echo "  --help, -h           Show this help message"
             echo "Examples:"
             echo "  $0 --config path/to/config.py                    # Run all modes with specified config"
+            echo "  $0 --config config.py --yaml profile.yaml        # Run with config + profile yaml"
             echo "  $0 --config config.py --modes train             # Run only training"
             echo "  $0 --config config.py --modes train,segeval     # Run training and segmentation evaluation"
             echo "  $0 --config config.py --work-dir /path/to/work   # Run with custom work directory"
@@ -164,6 +180,7 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 --config config.py --modes segeval --resume  # Resume segmentation evaluation"
             echo "  $0 --config config.py --modes demo --work-dir /path/to/work  # Launch local Gradio demo (requires checkpoint in work-dir)"
             echo "  $0 --config config.py --modes sweep --sweep-args \"--layers -1,-2 --train-epochs 1 --train-ratio 0.05\""
+            echo "  $0 --modes sweep_language --sweep-yaml xsam/xsam/configs/xsam/layer_analysis/language/profiles/language_sweep.yaml --sweep-args \"--dry-run\""
             exit 0
             ;;
         *)
@@ -174,11 +191,43 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-# Validate config_file is provided
+# Validate config_file
 if [ -z "$config_file" ]; then
-    echo "Error: --config/-c parameter is required. Please specify a config file."
-    echo "Usage: $0 [--modes MODE1,MODE2,...] --config CONFIG_FILE [--work-dir WORK_DIR] [--suffix SUFFIX] [--help]"
-    exit 1
+    if [ ${#modes[@]} -gt 0 ]; then
+        sweep_lang_only=1
+        for mode in "${modes[@]}"; do
+            if [[ "$mode" != "sweep_language" ]]; then
+                sweep_lang_only=0
+                break
+            fi
+        done
+        if [ "$sweep_lang_only" -eq 1 ]; then
+            config_file="xsam/xsam/configs/xsam/layer_analysis/language/xsam_sam3_language.py"
+            echo -e "$log_format --config not provided; using default config for sweep_language-only run: $config_file"
+        else
+            echo "Error: --config/-c parameter is required. Please specify a config file."
+            echo "Usage: $0 [--modes MODE1,MODE2,...] --config CONFIG_FILE [--yaml PROFILE_YAML] [--work-dir WORK_DIR] [--suffix SUFFIX] [--help]"
+            exit 1
+        fi
+    else
+        echo "Error: --config/-c parameter is required. Please specify a config file."
+        echo "Usage: $0 [--modes MODE1,MODE2,...] --config CONFIG_FILE [--yaml PROFILE_YAML] [--work-dir WORK_DIR] [--suffix SUFFIX] [--help]"
+        exit 1
+    fi
+fi
+
+if [[ -n "$profile_yaml" ]]; then
+    profile_yaml_abs="$profile_yaml"
+    [ -f "$profile_yaml_abs" ] || profile_yaml_abs="$root_dir/$profile_yaml"
+    [ -f "$profile_yaml_abs" ] || profile_yaml_abs="$root_dir/${profile_yaml#$code_name/}"
+    if [ ! -f "$profile_yaml_abs" ]; then
+        echo "Error: --yaml/-y file not found: $profile_yaml"
+        exit 1
+    fi
+    profile_yaml_abs="$(realpath "$profile_yaml_abs")"
+    profile_name_suffix="$(basename "$profile_yaml_abs")"
+    profile_name_suffix="${profile_name_suffix%.yaml}"
+    profile_name_suffix="${profile_name_suffix%.yml}"
 fi
 
 # Extract prefix from config file path
@@ -198,6 +247,11 @@ if [ ${#modes[@]} -eq 0 ]; then
     modes=("${default_modes[@]}")
 fi
 model_name=$(basename "$config_file" .py)
+if [[ -n "$profile_name_suffix" ]]; then
+    if [[ "$model_name" != *"__${profile_name_suffix}" && "$model_name" != *"${profile_name_suffix}"* ]]; then
+        model_name="${model_name}__${profile_name_suffix}"
+    fi
+fi
 
 # Set vlm_name based on config_file content
 if [[ "$config_file" == *"llava"* ]]; then
@@ -220,11 +274,12 @@ fi
 
 # Normalize to absolute path so later `cd` operations won't break path checks.
 work_dir="$(realpath -m "$work_dir")"
+export WORK_DIR="$work_dir/"
 
 ckpt_file="$work_dir/pytorch_model.bin"
 
 # Validate modes
-valid_modes=("train" "segeval" "vlmeval" "visualize" "demo" "sweep")
+valid_modes=("train" "segeval" "vlmeval" "visualize" "demo" "sweep" "sweep_spatial" "sweep_language")
 for mode in "${modes[@]}"; do
     valid=0
     for valid_mode in "${valid_modes[@]}"; do
@@ -271,6 +326,19 @@ if [[ -z "$deepspeed_cfg" ]]; then
 fi
 echo -e "$log_format DeepSpeed config: $deepspeed_cfg"
 
+run_and_log() {
+    local log_file="$1"
+    shift
+    if [ "$node_rank" = "0" ]; then
+        "$@" 2>&1 | tee "$log_file"
+        local rc=${PIPESTATUS[0]}
+    else
+        "$@" 2>&1 | cat
+        local rc=${PIPESTATUS[0]}
+    fi
+    return "$rc"
+}
+
 # Run
 for mode in "${modes[@]}"
 do
@@ -290,6 +358,12 @@ do
     if [ -d "$work_dir/$code_name" ]; then
         code_dir="$work_dir/$code_name"
         cp $(realpath $0) $work_dir
+        if command -v rsync >/dev/null 2>&1; then
+            rsync -a --delete --exclude "*.crc" "$src_code_dir/" "$code_dir/"
+        else
+            cp -rf "$src_code_dir"/. "$code_dir"/
+            find "$code_dir" -name "*.crc" -type f -delete
+        fi
     fi
 
     # Always sync latest source config into work_dir snapshot to avoid stale copied configs.
@@ -307,12 +381,37 @@ do
         echo -e "$log_format Synced config to snapshot: $cfg_rel"
     fi
 
+    profile_yaml_runtime=""
+    if [[ -n "$profile_yaml_abs" ]]; then
+        profile_yaml_runtime="$profile_yaml_abs"
+        if [ -d "$work_dir/$code_name" ] && [ -f "$profile_yaml_abs" ]; then
+            if [[ "$profile_yaml_abs" == "$src_code_dir/"* ]]; then
+                profile_yaml_rel="${profile_yaml_abs#$src_code_dir/}"
+            else
+                profile_yaml_rel="$(basename "$profile_yaml_abs")"
+            fi
+            mkdir -p "$code_dir/$(dirname "$profile_yaml_rel")"
+            cp -f "$profile_yaml_abs" "$code_dir/$profile_yaml_rel"
+            profile_yaml_runtime="$(realpath -m "$code_dir/$profile_yaml_rel")"
+            echo -e "$log_format Synced profile yaml to snapshot: $profile_yaml_rel"
+        fi
+    fi
+
     cd $code_dir
     export CODE_DIR="$code_dir/"
     echo -e "$log_format code_dir: $code_dir"
 
     [ -f "$config_file" ] || config_file="${config_file#$code_name/}"
     [ -f "$config_file" ] || { echo -e "$log_format Config file not found: $config_file" >&2; exit 1; }
+    if [[ -n "$profile_yaml_runtime" ]]; then
+        export XSAM_CONFIG_PROFILE_YAML="$profile_yaml_runtime"
+        # Backward compatibility for configs that still read legacy env var.
+        export XSAM_SEG_PROFILE_YAML="$profile_yaml_runtime"
+        echo -e "$log_format Using profile yaml: $XSAM_CONFIG_PROFILE_YAML"
+    else
+        unset XSAM_CONFIG_PROFILE_YAML
+        unset XSAM_SEG_PROFILE_YAML
+    fi
     
     # mode: train
     trained_flag=0
@@ -328,27 +427,41 @@ PY
             echo -e "$log_format Config preflight failed: $config_file"
             exit 1
         fi
-        PYTHONPATH="$(realpath $code_dir)":$PYTHONPATH OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-            "${torchrun_cmd[@]}" --master_addr=$master_addr --master_port=$master_port --nproc_per_node=$gpu_per_node \
-            $code_dir/xsam/tools/train.py \
-            $config_file \
-            --work-dir $work_dir \
+        if ! run_and_log "$work_dir/${mode}-${time}.log" \
+            env PYTHONPATH="$(realpath "$code_dir")":$PYTHONPATH OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+            "${torchrun_cmd[@]}" --master_addr="$master_addr" --master_port="$master_port" --nproc_per_node="$gpu_per_node" \
+            "$code_dir/xsam/tools/train.py" \
+            "$config_file" \
+            --work-dir "$work_dir" \
             --resume auto \
             --launcher pytorch \
-            --deepspeed $deepspeed_cfg \
-            --seed 1024 | { [ $node_rank = "0" ] && tee $work_dir/${mode}-${time}.log || cat; }
+            --deepspeed "$deepspeed_cfg" \
+            --seed 1024; then
+            echo -e "$log_format Train failed: $model_name"
+            exit 1
+        fi
     fi
-    # mode: sweep
-    if [ $mode = "sweep" ]; then
+    # mode: sweep_spatial (alias: sweep)
+    if [ "$mode" = "sweep" ] || [ "$mode" = "sweep_spatial" ]; then
         echo -e "$log_format Sweeping spatial probe layers: $model_name."
         if [ "$node_rank" = "0" ]; then
             mkdir -p "$work_dir"
         fi
-        sweep_script="$root_dir/external/sam3/layer_analysis/sweep_L_spatial.py"
+        sweep_script="$root_dir/scripts/layer_analysis/run_spatial_sweep.sh"
         sweep_config="$source_cfg_abs"
+        if [[ "$config_file" == "xsam/xsam/configs/xsam/s1_seg_finetune/sam3/xsam_sam3_1008_e12_gpu2_seg_finetune.py" || \
+              "$config_file" == "configs/xsam/s1_seg_finetune/sam3/xsam_sam3_1008_e12_gpu2_seg_finetune.py" || \
+              "$config_file" == *"/s1_seg_finetune/sam3/xsam_sam3_1008_e12_gpu2_seg_finetune.py" ]]; then
+            sweep_config="$root_dir/xsam/xsam/configs/xsam/layer_analysis/spatial/xsam_sam3_spatial.py"
+            echo -e "$log_format Spatial sweep is decoupled from stage1 sam3 config; using dedicated sweep config: ${sweep_config#$root_dir/}"
+        fi
         [ -f "$sweep_config" ] || sweep_config="$config_file"
         [ -f "$sweep_config" ] || sweep_config="$root_dir/$config_file"
-        sweep_cmd=("$python_cmd" "$sweep_script" "--config" "$sweep_config")
+        sweep_cmd=("bash" "$sweep_script")
+        if [[ -n "$sweep_yaml" ]]; then
+            sweep_cmd+=("$sweep_yaml")
+        fi
+        sweep_cmd+=("--config" "$sweep_config")
         if [[ -n "$sweep_args" ]]; then
             read -r -a sweep_args_arr <<< "$sweep_args"
             normalized_sweep_args=()
@@ -367,8 +480,34 @@ PY
             done
             sweep_cmd+=("${normalized_sweep_args[@]}")
         fi
-        PYTHONPATH="$(realpath $code_dir)":$PYTHONPATH OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-            "${sweep_cmd[@]}" | { [ $node_rank = "0" ] && tee $work_dir/${mode}-${time}.log || cat; }
+        if ! run_and_log "$work_dir/${mode}-${time}.log" \
+            env PYTHONPATH="$(realpath "$code_dir")":$PYTHONPATH OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+            "${sweep_cmd[@]}"; then
+            echo -e "$log_format Spatial sweep failed."
+            exit 1
+        fi
+    fi
+    # mode: sweep_language
+    if [ "$mode" = "sweep_language" ]; then
+        echo -e "$log_format Sweeping language probe phases."
+        if [ "$node_rank" = "0" ]; then
+            mkdir -p "$work_dir"
+        fi
+        sweep_lang_script="$root_dir/scripts/layer_analysis/run_language_sweep.sh"
+        sweep_lang_cmd=("bash" "$sweep_lang_script")
+        if [[ -n "$sweep_yaml" ]]; then
+            sweep_lang_cmd+=("$sweep_yaml")
+        fi
+        if [[ -n "$sweep_args" ]]; then
+            read -r -a sweep_args_arr <<< "$sweep_args"
+            sweep_lang_cmd+=("${sweep_args_arr[@]}")
+        fi
+        if ! run_and_log "$work_dir/${mode}-${time}.log" \
+            env PYTHONPATH="$(realpath "$code_dir")":$PYTHONPATH OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+            "${sweep_lang_cmd[@]}"; then
+            echo -e "$log_format Language sweep failed."
+            exit 1
+        fi
     fi
     # Check if training completed successfully
     if [ -f $ckpt_file ]; then
@@ -382,15 +521,19 @@ PY
         if [ "$segeval_resume" = "1" ]; then
             segeval_resume_args+=(--resume)
         fi
-        PYTHONPATH="$(realpath $code_dir)":$PYTHONPATH OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-            "${torchrun_cmd[@]}" --master_addr=$master_addr --master_port=$master_port --nproc_per_node=$gpu_per_node \
-            $code_dir/xsam/tools/eval.py \
-            $config_file \
+        if ! run_and_log "$work_dir/${mode}-${time}.log" \
+            env PYTHONPATH="$(realpath "$code_dir")":$PYTHONPATH OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+            "${torchrun_cmd[@]}" --master_addr="$master_addr" --master_port="$master_port" --nproc_per_node="$gpu_per_node" \
+            "$code_dir/xsam/tools/eval.py" \
+            "$config_file" \
             --launcher pytorch \
-            --work-dir $work_dir \
+            --work-dir "$work_dir" \
             --seed 0 \
             --pth_model latest \
-            "${segeval_resume_args[@]}" | { [ $node_rank = "0" ] && tee $work_dir/${mode}-${time}.log || cat; }
+            "${segeval_resume_args[@]}"; then
+            echo -e "$log_format Seg eval failed."
+            exit 1
+        fi
     fi
     # mode: vlmeval
     if [ $mode = "vlmeval" ] && [ $trained_flag = 1 ]; then
@@ -411,36 +554,48 @@ PY
         if [ -d "$work_dir/xtuner_model" ]; then
             echo -e "$log_format Evaluating VLM: $model_name."
             [ $node_rank -ne 0 ] && sleep 30
-            PYTHONPATH="$(realpath $code_dir)":$PYTHONPATH OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-                "${torchrun_cmd[@]}" --master_addr=$master_addr --master_port=$master_port --nproc_per_node=$gpu_per_node \
-                $code_dir/xsam/evaluation/vlmeval/run.py \
+            if ! run_and_log "$work_dir/${mode}-${time}.log" \
+                env PYTHONPATH="$(realpath "$code_dir")":$PYTHONPATH OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+                "${torchrun_cmd[@]}" --master_addr="$master_addr" --master_port="$master_port" --nproc_per_node="$gpu_per_node" \
+                "$code_dir/xsam/evaluation/vlmeval/run.py" \
                 --data MME MMBench_DEV_EN SEEDBench_IMG POPE AI2D_TEST \
-                --model $vlm_name \
-                --work-dir $work_dir/vlmeval_results | { [ "$node_rank" = "0" ] && tee "$work_dir/${mode}-${time}.log" || cat; }
+                --model "$vlm_name" \
+                --work-dir "$work_dir/vlmeval_results"; then
+                echo -e "$log_format VLM eval failed."
+                exit 1
+            fi
         fi
     fi
     # mode: visualize
     if [ $mode = "visualize" ] && [ $trained_flag = 1 ] && [ $node_rank = 0 ]; then
         echo -e "$log_format Visualizing $model_name."
-        PYTHONPATH="$(realpath $code_dir)":$PYTHONPATH OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-            "$python_cmd" $code_dir/xsam/tools/visualize.py \
-            $config_file \
-            --work-dir $work_dir \
+        if ! run_and_log "$work_dir/${mode}-${time}.log" \
+            env PYTHONPATH="$(realpath "$code_dir")":$PYTHONPATH OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+            "$python_cmd" "$code_dir/xsam/tools/visualize.py" \
+            "$config_file" \
+            --work-dir "$work_dir" \
             --seed 0 \
-            --pth_model latest | { [ $node_rank = "0" ] && tee $work_dir/${mode}-${time}.log || cat; }
+            --pth_model latest; then
+            echo -e "$log_format Visualize failed."
+            exit 1
+        fi
     fi
     # mode: demo
     if [ $mode = "demo" ] && [ $trained_flag = 1 ] && [ $node_rank = 0 ]; then
         echo -e "$log_format Demoing $model_name."
         mkdir -p "$work_dir/app_logs"
-        PYTHONPATH="$(realpath $code_dir)":$PYTHONPATH OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-            "$python_cmd" $code_dir/xsam/demo/app.py \
-            $config_file \
-            --work-dir $work_dir \
-            --log-dir $work_dir/app_logs \
+        if ! run_and_log "$work_dir/${mode}-${time}.log" \
+            env PYTHONPATH="$(realpath "$code_dir")":$PYTHONPATH OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+            "$python_cmd" "$code_dir/xsam/demo/app.py" \
+            "$config_file" \
+            --work-dir "$work_dir" \
+            --log-dir "$work_dir/app_logs" \
             --pth_model latest \
             --seed 0 \
-            --port 7862 | { [ $node_rank = "0" ] && tee $work_dir/${mode}-${time}.log || cat; }
+            --port 7862; then
+            echo -e "$log_format Demo failed."
+            exit 1
+        fi
     fi
     rm -rf /tmp/xsam_cache > /dev/null 2>&1
 done

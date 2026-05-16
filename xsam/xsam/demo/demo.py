@@ -704,22 +704,24 @@ if __name__ == "__main__":
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # 原作者權重
-CFG=xsam/xsam/configs/xsam/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune.py
+CFG=xsam/xsam/configs/xsam/s3_mixed_finetune/sam/xsam_sam_mixed_finetune.py
+YAML=xsam/xsam/configs/xsam/s3_mixed_finetune/sam/profiles/phi3_mini.yaml
 WORK=inits/X-SAM/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune
 CKPT=$WORK/pytorch_model.bin
 
-python xsam/xsam/demo/demo.py $CFG \
+XSAM_CONFIG_PROFILE_YAML=$YAML python xsam/xsam/demo/demo.py $CFG \
   --pth_model $CKPT \
   --image xsam/xsam/demo/images/genseg.jpg \
   --prompt "ins: person, bird, boat; sem: water, sky" \
   --task_name genseg
 
 # SAM2 FT 
-CFG=xsam/xsam/configs/xsam/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu1_mixed_finetune.py
+CFG=xsam/xsam/configs/xsam/s3_mixed_finetune/sam2/xsam_sam2_mixed_finetune.py
+YAML=xsam/xsam/configs/xsam/s3_mixed_finetune/sam2/profiles/base_plus_1024_gpu1.yaml
 WORK=runs/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu1_mixed_finetune
 CKPT=$WORK/pytorch_model.bin
 
-python xsam/xsam/demo/demo.py $CFG \
+XSAM_CONFIG_PROFILE_YAML=$YAML python xsam/xsam/demo/demo.py $CFG \
   --pth_model $CKPT \
   --image xsam/xsam/demo/images/genseg.jpg \
   --prompt "ins: person, bird, boat; sem: water, sky" \
@@ -730,11 +732,12 @@ python xsam/xsam/demo/demo.py $CFG \
 
 # EVAL
 
-CFG=xsam/xsam/configs/xsam/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu1_mixed_finetune.py
+CFG=xsam/xsam/configs/xsam/s3_mixed_finetune/sam2/xsam_sam2_mixed_finetune.py
+YAML=xsam/xsam/configs/xsam/s3_mixed_finetune/sam2/profiles/base_plus_1024_gpu1.yaml
 WORK=/home/michael/projects/Research/X-SAM/runs/s3_mixed_finetune/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam2_base_plus_1024_m2f_gpu1_mixed_finetune
-MASTER_PORT=29601 bash run.sh --modes segeval --config $CFG --work-dir $WORK
+MASTER_PORT=29601 bash run.sh --modes segeval --config $CFG --yaml $YAML --work-dir $WORK
 
 # VLM benchmarks（會先 pth->HF 再評測）
-bash run.sh --modes vlmeval --config $CFG --work-dir $WORK
+bash run.sh --modes vlmeval --config $CFG --yaml $YAML --work-dir $WORK
 
 """

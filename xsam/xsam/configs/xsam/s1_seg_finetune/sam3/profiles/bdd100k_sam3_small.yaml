@@ -1,0 +1,64 @@
+profile_name: bdd100k_sam3_small
+
+# Model
+seg_encoder_name: sam3
+sam3_encoder_trunk: sam3_encoder.bin
+sam3_simple_fpn: sam3_fpn.bin
+seg_decoder_name: mask2former-swin-large-coco-panoptic
+s1_pretrained_pth: extracted_weights/mask2former_decoder/xsam_mask2former_decoder.bin
+segmentor_trunk_mode: lora
+segmentor_fpn_mode: full_ft
+segmentor_lora_rank: 16
+segmentor_lora_alpha: 32
+segmentor_lora_dropout: 0.05
+segmentor_lora_bias: none
+segmentor_lora_target_modules: null
+use_activation_checkpointing: true
+find_unused_parameters: false
+
+# Data
+image_size: 672
+data_root: BDD/bdd100k/
+train_data_relpath: sam3/bdd100k_panoptic_sam3_train_smoke.json
+train_image_folder_relpath: data/bdd100k/images/10k/train
+train_panseg_map_relpath: null
+train_semseg_map_relpath: null
+train_task_name: genseg
+train_data_name: bdd100k_instance_genseg
+pad_image_to_square: true
+train_min_scale: 0.5
+train_max_scale: 1.0
+val_datasets:
+  - data_relpath: sam3/bdd100k_panoptic_sam3_val_smoke.json
+    image_folder_relpath: data/bdd100k/images/10k/val
+    panseg_map_relpath: null
+    semseg_map_relpath: null
+    task_name: genseg
+    data_name: bdd100k_instance_genseg
+    postprocess_task_name: instance_genseg
+    evaluator_data_name: bdd100k_instance_genseg
+
+# Scheduler & Optimizer
+batch_size: 1
+accumulative_counts: 1
+dataloader_num_workers: 0
+max_iters: 10
+optim_type: AdamW
+lr: 1.0e-4
+betas: [0.9, 0.999]
+weight_decay: 0.05
+max_norm: 0.01
+warmup_ratio: 0.03
+milestones: [8, 10]
+
+# Dataloader
+persistent_workers: false
+prefetch_factor: 2
+pin_memory: true
+
+# Save
+save_steps: 10
+save_total_limit: 2
+
+# Logging
+logging_interval: 1

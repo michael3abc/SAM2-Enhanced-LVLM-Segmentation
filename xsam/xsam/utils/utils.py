@@ -1,5 +1,6 @@
 from types import FunctionType
 
+from mmengine.registry import FUNCTIONS
 from xtuner.registry import BUILDER, MAP_FUNC
 
 
@@ -9,6 +10,8 @@ def register_function(cfg_dict):
         for key, value in dict.items(cfg_dict):
             if key == "type" and isinstance(value, FunctionType):
                 value_str = str(value)
+                if value_str not in FUNCTIONS:
+                    FUNCTIONS.register_module(module=value, name=value_str)
                 if value_str not in MAP_FUNC:
                     MAP_FUNC.register_module(module=value, name=value_str)
                 if value_str not in BUILDER:

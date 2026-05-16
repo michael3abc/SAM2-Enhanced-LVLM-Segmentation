@@ -1,0 +1,45 @@
+profile_name: base_1008_e12_gpu2_ft
+
+# Model
+seg_encoder_name: sam3
+sam3_encoder_trunk: sam3_encoder.bin
+sam3_simple_fpn: sam3_fpn.bin
+seg_decoder_name: mask2former-swin-large-coco-panoptic
+s1_pretrained_pth: runs/s1_seg_finetune/xsam_sam3_1008_e12_gpu2_seg_finetune/pytorch_model.bin
+segmentor_trunk_mode: lora
+segmentor_fpn_mode: full_ft
+segmentor_lora_rank: 64
+segmentor_lora_alpha: 128
+segmentor_lora_dropout: 0.05
+segmentor_lora_bias: none
+segmentor_lora_target_modules: null
+use_activation_checkpointing: false
+find_unused_parameters: false
+
+# Data
+image_size: 1008
+
+# Scheduler & Optimizer
+batch_size: 2
+accumulative_counts: 16
+dataloader_num_workers: 8
+max_epochs: 4
+optim_type: AdamW
+lr: 1.0e-4
+betas: [0.9, 0.999]
+weight_decay: 0.05
+max_norm: 0.01
+warmup_ratio: 0.03
+milestones: [8, 10]
+
+# Dataloader
+persistent_workers: true
+prefetch_factor: 4
+pin_memory: true
+
+# Save
+save_steps: 5000
+save_total_limit: 2
+
+# Logging
+logging_interval: 10

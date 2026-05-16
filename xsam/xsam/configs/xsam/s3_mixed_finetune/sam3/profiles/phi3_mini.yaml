@@ -1,0 +1,59 @@
+profile_name: phi3_mini
+llm_name: Phi-3-mini-4k-instruct
+prompt_template: phi3_chat
+max_length: 1024
+image_size: 1008
+
+seg_encoder_name: sam3
+seg_decoder_name: mask2former-swin-large-coco-panoptic
+sam3_encoder_trunk: sam3_encoder.bin
+sam3_simple_fpn: sam3_fpn.bin
+
+s1_pretrained_relpath: runs/s1_seg_finetune/xsam_sam3_1008_e4_gpu2_lora_ft/pytorch_model.bin
+s2_pretrained_relpath: runs/s2_align_pretrain/xsam_sam3_align_pretrain__sma3_s2/pytorch_model.bin
+
+segmentor_trunk_mode: freeze
+segmentor_fpn_mode: full_ft
+segmentor_lora_rank: 64
+segmentor_lora_alpha: 128
+segmentor_lora_dropout: 0.05
+segmentor_lora_bias: none
+segmentor_lora_target_modules: null
+
+enable_lora: true
+llm_lora_rank: 64
+llm_lora_alpha: 128
+llm_lora_dropout: 0.05
+llm_lora_target_modules: null
+enable_4bit_llm: true
+freeze_llm: true
+
+lang_bast_layers: [-2]
+seg_bast_layers: [-12]
+lang_downsample_ratio: 0.5
+seg_downsample_ratio: 0.5
+projector_depth: 2
+
+connector_type: null
+llm_attn_implementation: flash_attention_2
+llava_split_mode: split
+persistent_workers: false
+pin_memory: false
+prefetch_factor: 2
+use_train_ratio: true
+use_activation_checkpointing: true
+
+batch_size: 1
+accumulative_counts: 32
+dataloader_num_workers: 4
+max_epochs: 1
+lr: 4.0e-5
+betas: [0.9, 0.999]
+weight_decay: 0.05
+max_norm: 1.0
+warmup_ratio: 0.03
+
+save_steps: 2000
+save_total_limit: 2
+logging_interval: 10
+evaluation_freq: 2000

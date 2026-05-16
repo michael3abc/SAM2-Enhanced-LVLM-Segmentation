@@ -1,0 +1,41 @@
+profile_name: large_1024_e36_gpu16
+
+# Model
+seg_encoder_name: sam-vit-large
+segmentor_trunk_mode: full_ft
+segmentor_fpn_mode: full_ft
+segmentor_lora_rank: 16
+segmentor_lora_alpha: 32
+segmentor_lora_dropout: 0.05
+segmentor_lora_bias: none
+segmentor_lora_target_modules: null
+use_activation_checkpointing: false
+find_unused_parameters: true
+
+# Data
+image_size: 1024
+
+# Scheduler & Optimizer
+batch_size: 4
+accumulative_counts: 1
+dataloader_num_workers: 8
+max_epochs: 36
+optim_type: AdamW
+lr: 1.0e-4
+betas: [0.9, 0.999]
+weight_decay: 0.05
+max_norm: 0.01
+warmup_ratio: 0.03
+milestones: [24, 30]
+
+# Dataloader
+persistent_workers: false
+prefetch_factor: 2
+pin_memory: true
+
+# Save
+save_steps: 2000
+save_total_limit: 2
+
+# Logging
+logging_interval: 10

@@ -1,0 +1,14 @@
+profile_name: cpu2
+batch_size: 8
+accumulative_counts: 8
+dataloader_num_workers: 6
+max_epochs: 3
+logging_interval: 10
+sweep_num_workers: 6
+sweep_train_epochs: 3
+sweep_grad_accum_steps: 8
+sweep_train_num_workers: 6
+sweep_resume: false
+sweep_resume_ckpt: null
+sweep_train_eval_interval: 200
+sweep_train_eval_max_samples: 256

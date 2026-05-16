@@ -8,10 +8,99 @@ from functools import partial
 from types import FunctionType
 
 import torch
+
+
+def _patch_torch_compiler_disable_for_deepspeed() -> None:
+    """Patch ``torch.compiler.disable`` for a known PyTorch 2.10 import bug.
+
+    Args:
+        None
+
+    Returns:
+        None
+    """
+    compiler_mod = getattr(torch, "compiler", None)
+    if compiler_mod is None or not hasattr(compiler_mod, "disable"):
+        return
+
+    original_disable = compiler_mod.disable
+    if getattr(original_disable, "__name__", "") == "_xsam_safe_torch_disable":
+        return
+
+    def _xsam_safe_torch_disable(fn=None, recursive=True, *, reason=None):
+        """Safely wrap ``torch.compiler.disable``.
+
+        Args:
+            fn: Target function or ``None``.
+            recursive: Whether recursive disable is enabled.
+            reason: Optional disable reason.
+
+        Returns:
+            Original-disable result or a no-op decorator/function fallback.
+        """
+        try:
+            return original_disable(fn, recursive=recursive, reason=reason)
+        except AssertionError as err:
+            err_msg = str(err)
+            known_msg = "precompile already registered in mega-cache artifact factory"
+            if known_msg not in err_msg:
+                raise
+            if fn is None:
+                return lambda inner: inner
+            return fn
+
+    compiler_mod.disable = _xsam_safe_torch_disable
+
+
+_patch_torch_compiler_disable_for_deepspeed()
+
+
+def _patch_torch_compiler_cache_register_for_multi_import() -> None:
+    """Patch cache artifact register to tolerate duplicate registration.
+
+    Args:
+        None
+
+    Returns:
+        None
+    """
+    try:
+        from torch.compiler import _cache as compiler_cache
+    except Exception:
+        return
+
+    factory = getattr(compiler_cache, "CacheArtifactFactory", None)
+    if factory is None or not hasattr(factory, "register"):
+        return
+
+    register_impl = getattr(factory.register, "__func__", factory.register)
+    if getattr(register_impl, "__name__", "") == "_xsam_safe_cache_register":
+        return
+
+    def _xsam_safe_cache_register(cls, artifact_cls):
+        """Register cache artifact class with duplicate-type tolerance.
+
+        Args:
+            cls: Cache artifact factory class.
+            artifact_cls: Artifact class to register.
+
+        Returns:
+            Registered artifact class.
+        """
+        artifact_type_key = artifact_cls.type()
+        if artifact_type_key in cls._artifact_types:
+            return artifact_cls
+        return register_impl(cls, artifact_cls)
+
+    factory.register = classmethod(_xsam_safe_cache_register)
+
+
+_patch_torch_compiler_cache_register_for_multi_import()
+
 from mmengine.config import Config, DictAction
 from mmengine.config.lazy import LazyObject
 from mmengine.model import BaseModel
-from mmengine.registry import RUNNERS
+from mmengine.registry import FUNCTIONS, RUNNERS
 from mmengine.runner import Runner
 from mmengine.utils import digit_version
 from peft import get_peft_model, prepare_model_for_kbit_training
@@ -73,6 +162,44 @@ def _load_seed_from_checkpoint_compat(pth_model: str) -> int:
         return checkpoint["meta"]["seed"]
 
 
+def _remap_resume_path_if_needed(resume_path: str | None, work_dir: str | None) -> str | None:
+    """Remap a missing resume checkpoint path to an existing local/container path.
+
+    Args:
+        resume_path: Resume checkpoint path returned by CLI or auto-discovery.
+        work_dir: Runtime work directory from CLI args.
+
+    Returns:
+        Resolved resume path if remapped successfully; otherwise the original path.
+    """
+    if resume_path is None or osp.exists(resume_path):
+        return resume_path
+
+    normalized = resume_path.rstrip("/")
+    candidates: list[str] = []
+
+    if work_dir:
+        candidates.append(osp.join(work_dir, osp.basename(normalized)))
+
+    if "/runs/" in normalized:
+        runs_suffix = normalized.split("/runs/", 1)[1]
+        root_dir = os.environ.get("ROOT_DIR", "").rstrip("/")
+        if root_dir:
+            candidates.append(osp.join(root_dir, "runs", runs_suffix))
+        candidates.append(osp.join("/workspace", "runs", runs_suffix))
+
+    for candidate in candidates:
+        if osp.exists(candidate):
+            print_log(
+                f"Remap resume checkpoint path: {resume_path} -> {candidate}",
+                logger="current",
+                level=logging.WARNING,
+            )
+            return candidate
+
+    return resume_path
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train LLM")
     parser.add_argument("config", help="config file name or path.")
@@ -117,6 +244,8 @@ def register_function(cfg_dict):
         for key, value in dict.items(cfg_dict):
             if isinstance(value, FunctionType):
                 value_str = str(value)
+                if value_str not in FUNCTIONS:
+                    FUNCTIONS.register_module(module=value, name=value_str)
                 if value_str not in MAP_FUNC:
                     MAP_FUNC.register_module(module=value, name=value_str)
                 cfg_dict[key] = value_str
@@ -188,7 +317,8 @@ def main():
     # Some lazy-built configs contain runtime objects (e.g. <class ...>, bound methods)
     # that are not valid Python literals for yapf verification in cfg.pretty_text.
     # Disable formatting verification to avoid crashing during runner env logging.
-    cfg._format_python_code = False
+    cfg._cfg_dict.pop("_format_python_code", None)
+    object.__setattr__(cfg, "_format_python_code", False)
 
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
@@ -205,6 +335,7 @@ def main():
         args.resume = find_latest_checkpoint(args.work_dir)
 
         print_log(f"Auto resumed from the latest checkpoint {args.resume}.", logger="current")
+    args.resume = _remap_resume_path_if_needed(args.resume, args.work_dir)
 
     if cfg.get("framework", "mmengine").lower() == "huggingface":
         # set default training_args
@@ -381,6 +512,11 @@ def main():
                 ds_grad_clip = ds_cfg.get("gradient_clipping", "auto")
                 clip_grad = cfg.optim_wrapper.get("clip_grad", None)
                 paramwise_cfg = cfg.optim_wrapper.get("paramwise_cfg", None)
+                if paramwise_cfg is not None:
+                    # LoRA/PEFT models can expose tied parameters by multiple names.
+                    # Skip duplicates to avoid optimizer param-group collisions.
+                    paramwise_cfg = paramwise_cfg.copy()
+                    paramwise_cfg.setdefault("bypass_duplicate", True)
                 if clip_grad and clip_grad.get("max_norm", None) is not None:
                     mm_max_norm = cfg.optim_wrapper.clip_grad.max_norm
                 else:

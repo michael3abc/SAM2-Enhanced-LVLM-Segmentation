@@ -180,6 +180,37 @@ def _load_sam3_vision_state_dict(
     )
 
 
+def _filter_state_dict_by_shape(
+    model: nn.Module,
+    state_dict: dict[str, torch.Tensor],
+    *,
+    strict: bool,
+) -> tuple[dict[str, torch.Tensor], list[tuple[str, tuple[int, ...], tuple[int, ...]]]]:
+    """Filter checkpoint tensors with incompatible shapes for non-strict loads.
+
+    Args:
+        model: Target model receiving the state dict.
+        state_dict: Candidate checkpoint state dict.
+        strict: Whether strict loading is requested.
+
+    Returns:
+        Tuple of filtered state dict and skipped shape-mismatch records.
+    """
+    if strict:
+        return state_dict, []
+
+    model_state = model.state_dict()
+    filtered_state = OrderedDict()
+    skipped = []
+    for key, value in state_dict.items():
+        target_value = model_state.get(key)
+        if target_value is not None and target_value.shape != value.shape:
+            skipped.append((key, tuple(value.shape), tuple(target_value.shape)))
+            continue
+        filtered_state[key] = value
+    return filtered_state, skipped
+
+
 @dataclass
 class Sam3VisionEncoderOutput(ModelOutput):
     """Outputs of SAM3 vision encoder."""
@@ -506,6 +537,9 @@ class Sam3VisionModel(Sam3PreTrainedModel):
             fpn_filename=fpn_filename,
             map_location=map_location,
         )
+        state_dict, skipped_shape_keys = _filter_state_dict_by_shape(model, state_dict, strict=strict)
+        if len(skipped_shape_keys) > 0:
+            logger.warning("Skipped SAM3 keys with shape mismatch: %s", skipped_shape_keys)
         missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=strict)
         if len(unexpected_keys) > 0:
             logger.warning("Unexpected SAM3 keys: %s", unexpected_keys)
@@ -632,6 +666,9 @@ class Sam3Model(Sam3PreTrainedModel):
             map_location=map_location,
         )
         wrapped_state = {f"vision_encoder.{k}": v for k, v in vision_state.items()}
+        wrapped_state, skipped_shape_keys = _filter_state_dict_by_shape(model, wrapped_state, strict=strict)
+        if len(skipped_shape_keys) > 0:
+            logger.warning("Skipped SAM3 keys with shape mismatch: %s", skipped_shape_keys)
         missing_keys, unexpected_keys = model.load_state_dict(wrapped_state, strict=strict)
         if len(unexpected_keys) > 0:
             logger.warning("Unexpected SAM3 keys: %s", unexpected_keys)

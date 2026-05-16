@@ -1,0 +1,54 @@
+version: 1
+
+paths:
+  run_root: runs/sweep_language
+  mmengine_config: xsam/xsam/configs/xsam/layer_analysis/language/xsam_sam3_language.py
+
+runtime:
+  metric_key: loss
+  metric_mode: min
+
+runner:
+  # Available placeholders:
+  # {phase}, {layer_id}, {config_yaml}, {mmengine_config}, {profile_yaml},
+  # {run_root}, {phase_dir}, {layer_work_dir}, {project_root}
+  train_command: >-
+    XSAM_LAYER_ID={layer_id} XSAM_SEG_BAST_LAYERS=-12 bash run.sh --modes train --config {mmengine_config}
+    --yaml {profile_yaml} --work-dir {layer_work_dir}
+
+
+common:
+  profile_root: xsam/xsam/configs/xsam/layer_analysis/language/profiles
+  # layers_all: [-1, -2, -4, -6, -8, -10, -12, -16, -24, -32]
+  layers_all: [-10, -12, -16, -24, -32]
+
+profile_common:
+  # Model init
+  llm_name: inits/extracted_weights/lvlm/xsam_siglip2_hf
+
+  seg_encoder_name: sam3
+  sam3_encoder_trunk: inits/sam3/sam3_encoder.bin
+  sam3_simple_fpn: inits/sam3/sam3_fpn.bin
+
+  # Data
+  data_relpath: llava/LLaVA-Instruct-150K/llava_imgconv_gqa.json
+  image_folder_relpath: llava/llava_images
+  prompt_template: phi3_chat
+  max_length: 2319
+  image_size: 1008
+  evaluation_image: ./data/imgconv_data/llava/llava_images/gqa/images/2354786.jpg
+
+default_phase: phase1
+phases:
+  phase1:
+    profile_yaml: "{profile_root}/phase1.yaml"
+    layers: all
+  phase2:
+    profile_yaml: "{profile_root}/phase2.yaml"
+    layers: topk
+    topk: 3
+    topk_from_phase: phase1
+  phase3:
+    profile_yaml: "{profile_root}/phase3.yaml"
+    layers: best
+    best_from_phase: phase2

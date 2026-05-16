@@ -1,0 +1,74 @@
+version: 1
+
+# mmengine config that defines model/dataset/evaluator pipelines.
+mmengine_config: xsam/xsam/configs/xsam/layer_analysis/spatial/xsam_sam3_spatial.py
+# mmengine runtime profile merged into xsam_sam3_spatial.py for sweep runs.
+mmengine_profile:
+  profile_name: default
+  batch_size: 2
+  accumulative_counts: 32
+  dataloader_num_workers: 8
+  max_epochs: 12
+  logging_interval: 50
+  sweep_num_workers: 4
+  sweep_train_epochs: 2
+  sweep_grad_accum_steps: 24
+  sweep_train_num_workers: 4
+  sweep_resume: true
+  sweep_resume_ckpt: runs/sweep_spatial_best_layers/sam3_probe_ep2/checkpoints/latest.pt
+  sweep_train_eval_interval: 0
+  sweep_train_eval_max_samples: 128
+
+common:
+  pth_model: null
+  layers: "-1,-2,-4,-6,-8,-10,-12,-16,-24,-32"
+  data_names: null
+  dense_keywords: "semantic_genseg,semantic_ovseg"
+  ref_keywords: "refseg"
+
+  batch_size: 1
+  num_workers: 4
+  max_samples_per_task: 0
+
+  train_epochs: 2
+  train_ratio: 0.25
+  train_batch_size: 1
+  grad_accum_steps: 24
+  train_num_workers: 4
+
+  save_steps: 5000
+  max_save: -2
+  resume: true
+  resume_ckpt: runs/sweep_spatial_best_layers/sam3_probe_ep2/checkpoints/latest.pt
+
+  probe_lr: 1.0e-4
+  probe_weight_decay: 0.05
+  probe_reinit: false
+
+  train_eval_interval: 0
+  train_eval_max_samples: 128
+  early_stop_patience_steps: 2000
+  early_stop_miou_eps: 0.1
+  seed_stride: 9973
+
+  output_csv: sweep_L_spatial.csv
+  output_root: runs/sweep_spatial_best_layers
+  run_name: sam3_probe_ep2
+
+  use_tqdm: false
+  log_interval: 50
+
+  eval_fail_fast: true
+  eval_fail_ratio_threshold: 0.05
+  eval_fail_check_min_samples: 64
+  eval_oom_empty_cache: true
+  eval_log_cuda_mem: true
+
+  seed: 1024
+  cfg_options: null
+
+# Keep phase blocks for future spatial phase split.
+default_phase: phase1
+phases:
+  phase1: {}
+  phase2: {}

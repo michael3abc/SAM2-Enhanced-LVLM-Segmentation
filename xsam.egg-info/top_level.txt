@@ -1,4 +1,0 @@
-sam2
-sam3
-training
-xsam

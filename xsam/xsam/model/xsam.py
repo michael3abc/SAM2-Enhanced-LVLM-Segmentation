@@ -50,6 +50,26 @@ from ..utils.constants import (
 from ..utils.misc import data_sample_to_device
 from .utils import prepare_inputs_labels_for_multimodal
 
+
+@dataclass
+class SegmentorEncoderPolicy:
+    """Resolved trainability policy for a segmentor encoder.
+
+    Args:
+        container_attr: Attribute name of the vision container on the encoder wrapper.
+        trunk_module_names: Relative module names inside the container that belong to the trunk.
+        trunk_markers: Parameter-name markers belonging to trunk/base backbone.
+        fpn_markers: Parameter-name markers belonging to FPN/neck blocks.
+    Returns:
+        None.
+    """
+
+    container_attr: str
+    trunk_module_names: tuple[str, ...]
+    trunk_markers: tuple[str, ...]
+    fpn_markers: tuple[str, ...]
+
+
 @dataclass
 class XSamOutput(ModelOutput):
     loss: Optional[torch.FloatTensor] = None
@@ -120,6 +140,8 @@ class XSamModel(BaseModel):
         # Backward-compatible aggregate flag: true only when both trunk/fpn are frozen.
         self.freeze_segmentor_encoder = bool(self.freeze_segmentor_trunk and self.freeze_segmentor_fpn)
         self.freeze_segmentor_connector = freeze_segmentor_connector
+        self.segmentor_lora_module: Optional[nn.Module] = None
+        self.segmentor_lora_prefix: Optional[str] = None
 
         assert (
             llm is not None or visual_encoder is not None or segmentor is not None
@@ -137,11 +159,11 @@ class XSamModel(BaseModel):
             dispatch_modules(self.llm)
 
         self.postprocess_fn = postprocess_fn
+        self.projector_depth = projector_depth
         if special_tokens is not None:
             self._add_special_tokens(special_tokens)
 
         if self.visual_encoder is not None:
-            self.projector_depth = projector_depth
             visual_projector_config = DynamicProjectorConfig(
                 visual_hidden_size=self.visual_encoder.config.hidden_size,
                 llm_hidden_size=self.llm.config.hidden_size,
@@ -190,6 +212,10 @@ class XSamModel(BaseModel):
             if self.segmentor.decoder is not None and self.segmentor.open_cls:
                 self.bg_embeds = nn.Embedding(1, self.segmentor.dec_config.hidden_size).to(self.segmentor.dtype)
 
+        self.use_llm_lora = llm_lora is not None
+        self.use_visual_encoder_lora = visual_encoder_lora is not None
+        self.use_segmentor_encoder_lora = segmentor_lora is not None
+
         if self.freeze_llm and self.llm is not None:
             self.llm.requires_grad_(False)
         if self.freeze_visual_encoder and self.visual_encoder is not None:
@@ -229,10 +255,6 @@ class XSamModel(BaseModel):
             self.gradient_checkpointing_enable()
         else:
             self.gradient_checkpointing_disable()
-
-        self.use_llm_lora = llm_lora is not None
-        self.use_visual_encoder_lora = visual_encoder_lora is not None
-        self.use_segmentor_encoder_lora = segmentor_lora is not None
 
         if s1_pretrained_pth is not None:
             pretrained_state_dict = guess_load_checkpoint(s1_pretrained_pth)
@@ -280,6 +302,7 @@ class XSamModel(BaseModel):
             self._prepare_visual_encoder_for_lora(visual_encoder_lora, use_activation_checkpointing)
         if self.use_segmentor_encoder_lora:
             self._prepare_segmentor_for_lora(segmentor_lora, use_activation_checkpointing)
+            self._set_segmentor_encoder_trainability()
 
         self.visual_select_layer = visual_select_layer
         self.visual_select_indx = visual_select_indx
@@ -302,30 +325,187 @@ class XSamModel(BaseModel):
         if self.segmentor is None or self.segmentor.encoder is None:
             return
 
-        if self.freeze_segmentor_encoder:
-            self.segmentor.encoder.requires_grad_(False)
+        policy = self._resolve_segmentor_encoder_policy()
+        encoder = self.segmentor.encoder
+
+        if policy is None:
+            if self.use_segmentor_encoder_lora:
+                for name, param in encoder.named_parameters():
+                    param.requires_grad_(self._is_segmentor_lora_param(name))
+            else:
+                encoder.requires_grad_(not self.freeze_segmentor_encoder)
+            print_log(
+                "Segmentor encoder policy fallback: unsupported encoder structure for trunk/fpn split.",
+                logger="current",
+                level=logging.WARNING,
+            )
             return
 
-        if not (self.freeze_segmentor_trunk or self.freeze_segmentor_fpn):
+        if self.use_segmentor_encoder_lora:
+            for name, param in encoder.named_parameters():
+                trainable = self._is_segmentor_lora_param(name)
+                if (not trainable) and (not self.freeze_segmentor_fpn):
+                    trainable = self._matches_segmentor_markers(name, policy.fpn_markers)
+                param.requires_grad_(trainable)
             return
 
-        if hasattr(self.segmentor.encoder, "vision_backbone"):
-            vision_backbone = self.segmentor.encoder.vision_backbone
-            if hasattr(vision_backbone, "trunk"):
-                vision_backbone.trunk.requires_grad_(not self.freeze_segmentor_trunk)
-            if hasattr(vision_backbone, "convs"):
-                vision_backbone.convs.requires_grad_(not self.freeze_segmentor_fpn)
-            if hasattr(vision_backbone, "sam2_convs") and vision_backbone.sam2_convs is not None:
-                vision_backbone.sam2_convs.requires_grad_(not self.freeze_segmentor_fpn)
+        if (not self.freeze_segmentor_trunk) and (not self.freeze_segmentor_fpn):
+            encoder.requires_grad_(True)
             return
 
-        print_log(
-            "Segmentor encoder has no `vision_backbone`; partial freeze flags fallback to whole-encoder behavior.",
-            logger="current",
-            level=logging.WARNING,
+        encoder.requires_grad_(False)
+        for name, param in encoder.named_parameters():
+            trainable = False
+            if not self.freeze_segmentor_trunk:
+                trainable = self._matches_segmentor_markers(name, policy.trunk_markers)
+            if (not trainable) and (not self.freeze_segmentor_fpn):
+                trainable = self._matches_segmentor_markers(name, policy.fpn_markers)
+            param.requires_grad_(trainable)
+
+    def _resolve_segmentor_encoder_policy(self) -> Optional[SegmentorEncoderPolicy]:
+        """Resolve architecture-aware segmentor trunk/FPN policy.
+
+        Args:
+            None.
+
+        Returns:
+            Resolved policy or ``None`` when unsupported.
+        """
+        if self.segmentor is None or self.segmentor.encoder is None:
+            return None
+
+        encoder = self.segmentor.encoder
+
+        vision_backbone = getattr(encoder, "vision_backbone", None)
+        if vision_backbone is not None and hasattr(vision_backbone, "trunk"):
+            return SegmentorEncoderPolicy(
+                container_attr="vision_backbone",
+                trunk_module_names=("trunk",),
+                trunk_markers=("trunk.",),
+                fpn_markers=("convs.", "sam2_convs.", "position_encoding."),
+            )
+
+        vision_encoder = getattr(encoder, "vision_encoder", None)
+        if vision_encoder is None:
+            return None
+
+        if hasattr(vision_encoder, "backbone") and hasattr(vision_encoder, "neck"):
+            return SegmentorEncoderPolicy(
+                container_attr="vision_encoder",
+                trunk_module_names=("backbone",),
+                trunk_markers=("backbone.",),
+                fpn_markers=("neck.",),
+            )
+
+        if hasattr(vision_encoder, "layers") and hasattr(vision_encoder, "neck"):
+            return SegmentorEncoderPolicy(
+                container_attr="vision_encoder",
+                trunk_module_names=("patch_embed", "layers"),
+                trunk_markers=("patch_embed.", "pos_embed", "layers."),
+                fpn_markers=("neck.",),
+            )
+
+        return None
+
+    def _matches_segmentor_markers(self, name: str, markers: tuple[str, ...]) -> bool:
+        """Check whether a parameter name belongs to a resolved group.
+
+        Args:
+            name: Full parameter name.
+            markers: Group markers.
+
+        Returns:
+            Whether the name belongs to the requested group.
+        """
+        return any(marker in name for marker in markers)
+
+    def _is_segmentor_lora_param(self, name: str) -> bool:
+        """Check whether a parameter belongs to a LoRA adapter branch.
+
+        Args:
+            name: Full parameter name.
+
+        Returns:
+            Whether the parameter is part of LoRA or modules-to-save state.
+        """
+        return ("lora_" in name) or ("modules_to_save" in name)
+
+    def _collect_segmentor_lora_target_modules(
+        self,
+        container: nn.Module,
+        trunk_module_names: tuple[str, ...],
+    ) -> list[str]:
+        """Collect PEFT-compatible leaf module paths from the segmentor trunk.
+
+        Args:
+            container: Wrapped vision container such as ``vision_encoder`` or ``vision_backbone``.
+            trunk_module_names: Relative trunk module names inside the container.
+
+        Returns:
+            Sorted list of full relative module paths under ``container`` that are PEFT-compatible.
+        """
+        try:
+            from transformers.pytorch_utils import Conv1D
+
+            supported_types = (
+                nn.Linear,
+                nn.Embedding,
+                nn.Conv1d,
+                nn.Conv2d,
+                nn.Conv3d,
+                nn.MultiheadAttention,
+                Conv1D,
+            )
+        except Exception:
+            supported_types = (
+                nn.Linear,
+                nn.Embedding,
+                nn.Conv1d,
+                nn.Conv2d,
+                nn.Conv3d,
+                nn.MultiheadAttention,
+            )
+
+        target_modules = set()
+        for module_name in trunk_module_names:
+            if not hasattr(container, module_name):
+                continue
+            trunk_module = getattr(container, module_name)
+            if isinstance(trunk_module, supported_types):
+                target_modules.add(module_name)
+                continue
+
+            for relative_name, submodule in trunk_module.named_modules():
+                if relative_name == "":
+                    continue
+                if isinstance(submodule, supported_types):
+                    target_modules.add(f"{module_name}.{relative_name}")
+
+        if len(target_modules) == 0:
+            raise ValueError(
+                "Failed to resolve PEFT target modules for segmentor trunk. "
+                f"Container={type(container).__name__}, trunk_modules={trunk_module_names!r}"
+            )
+        return sorted(target_modules)
+
+    def _collect_segmentor_encoder_state(self, state_dict: OrderedDict, markers: tuple[str, ...]) -> OrderedDict:
+        """Collect encoder state dict entries that match the requested markers.
+
+        Args:
+            state_dict: Full model state dict.
+            markers: Segmentor encoder markers to keep.
+
+        Returns:
+            Filtered ordered dict for ``segmentor.encoder`` submodules.
+        """
+        return OrderedDict(
+            (
+                key,
+                value,
+            )
+            for key, value in state_dict.items()
+            if "segmentor.encoder." in key and self._matches_segmentor_markers(key, markers)
         )
-        if self.freeze_segmentor_trunk and self.freeze_segmentor_fpn:
-            self.segmentor.encoder.requires_grad_(False)
 
     @property
     def device(self):
@@ -1032,7 +1212,15 @@ class XSamModel(BaseModel):
         # Step 2. segmentor
         if self.segmentor is not None:
             if self.use_segmentor_encoder_lora:
-                to_return.update(get_peft_model_state_dict(self.segmentor.encoder, state_dict=state_dict))
+                if self.segmentor_lora_module is None or self.segmentor_lora_prefix is None:
+                    raise RuntimeError("Segmentor LoRA is enabled but no wrapped segmentor module is registered.")
+                adapter_state = get_peft_model_state_dict(self.segmentor_lora_module)
+                for key, value in adapter_state.items():
+                    to_return[f"{self.segmentor_lora_prefix}.{key}"] = value
+                if not self.freeze_segmentor_fpn:
+                    policy = self._resolve_segmentor_encoder_policy()
+                    if policy is not None:
+                        to_return.update(self._collect_segmentor_encoder_state(state_dict, policy.fpn_markers))
             elif not self.freeze_segmentor_encoder:
                 to_return.update({k: v for k, v in state_dict.items() if "segmentor.encoder" in k})
 
@@ -1080,49 +1268,154 @@ class XSamModel(BaseModel):
         self.visual_encoder = get_peft_model(self.visual_encoder, lora_config)
 
     def _prepare_segmentor_for_lora(self, lora_config, use_activation_checkpointing=True):
+        """Wrap the segmentor vision container with LoRA adapters.
+
+        Args:
+            lora_config: LoRA config object or build config.
+            use_activation_checkpointing: Unused, kept for API parity.
+
+        Returns:
+            None.
+        """
         if self.segmentor is None:
             return
+        del use_activation_checkpointing
         lora_config = self._parse_lora_config(lora_config)
+        # Segmentor vision containers are plain nn.Module blocks, not HF task models.
+        # Force generic PeftModel wrapper so positional tensor inputs keep their original signature.
+        lora_config.task_type = None
+        policy = self._resolve_segmentor_encoder_policy()
+        if policy is None:
+            raise ValueError("Segmentor encoder does not expose a supported trunk container for LoRA.")
+        encoder = self.segmentor.encoder
+        container = getattr(encoder, policy.container_attr)
         if lora_config.target_modules is None:
-            modules = find_all_linear_names(self.segmentor.encoder)
+            modules = self._collect_segmentor_lora_target_modules(container, policy.trunk_module_names)
             lora_config.target_modules = modules
-        self.segmentor = get_peft_model(self.segmentor.encoder, lora_config)
+        wrapped_container = get_peft_model(container, lora_config)
+        setattr(encoder, policy.container_attr, wrapped_container)
+        self.segmentor_lora_module = wrapped_container
+        self.segmentor_lora_prefix = f"segmentor.encoder.{policy.container_attr}"
 
     def gradient_checkpointing_enable(self):
         self.activation_checkpointing_enable()
 
+    def _toggle_module_gradient_checkpointing(
+        self,
+        module: Optional[nn.Module],
+        *,
+        enable: bool,
+        module_name: str,
+        enable_kwargs: Optional[dict] = None,
+    ) -> None:
+        """Toggle gradient checkpointing on a child module when supported.
+
+        Args:
+            module: Target module.
+            enable: Whether to enable or disable checkpointing.
+            module_name: Human-readable module name for logs.
+            enable_kwargs: Optional kwargs for the enable call.
+        Returns:
+            None.
+        """
+
+        if module is None:
+            return
+
+        method_name = "gradient_checkpointing_enable" if enable else "gradient_checkpointing_disable"
+        method = getattr(module, method_name, None)
+        if method is None:
+            if enable:
+                print_log(
+                    f"Skip activation checkpointing for {module_name}: method `{method_name}` is missing.",
+                    logger="current",
+                    level=logging.WARNING,
+                )
+            return
+
+        try:
+            if enable and enable_kwargs is not None:
+                method(enable_kwargs)
+            else:
+                method()
+        except ValueError as exc:
+            if "gradient checkpointing" not in str(exc).lower():
+                raise
+            print_log(
+                f"Skip activation checkpointing for {module_name}: {exc}",
+                logger="current",
+                level=logging.WARNING,
+            )
+
     def activation_checkpointing_enable(self):
-        if self.llm is not None:
-            self.llm.gradient_checkpointing_enable()
-        if self.visual_encoder is not None:
-            self.visual_encoder.gradient_checkpointing_enable()
-            self.visual_projector.gradient_checkpointing_enable()
-        if self.segmentor is not None:
-            self.segmentor.gradient_checkpointing_enable({"use_reentrant": False})
-            if hasattr(self, "seg_projector"):
-                self.seg_projector.gradient_checkpointing_enable()
-            if hasattr(self, "llm_projector"):
-                self.llm_projector.gradient_checkpointing_enable()
-            if hasattr(self, "seg_connector"):
-                self.seg_connector.gradient_checkpointing_enable()
+        self._toggle_module_gradient_checkpointing(self.llm, enable=True, module_name="llm")
+        self._toggle_module_gradient_checkpointing(
+            getattr(self, "visual_encoder", None),
+            enable=True,
+            module_name="visual_encoder",
+        )
+        self._toggle_module_gradient_checkpointing(
+            getattr(self, "visual_projector", None),
+            enable=True,
+            module_name="visual_projector",
+        )
+        self._toggle_module_gradient_checkpointing(
+            getattr(self, "segmentor", None),
+            enable=True,
+            module_name="segmentor",
+            enable_kwargs={"use_reentrant": False},
+        )
+        self._toggle_module_gradient_checkpointing(
+            getattr(self, "seg_projector", None),
+            enable=True,
+            module_name="seg_projector",
+        )
+        self._toggle_module_gradient_checkpointing(
+            getattr(self, "llm_projector", None),
+            enable=True,
+            module_name="llm_projector",
+        )
+        self._toggle_module_gradient_checkpointing(
+            getattr(self, "seg_connector", None),
+            enable=True,
+            module_name="seg_connector",
+        )
 
     def gradient_checkpointing_disable(self):
         self.activation_checkpointing_disable()
 
     def activation_checkpointing_disable(self):
-        if self.llm is not None:
-            self.llm.gradient_checkpointing_disable()
-        if self.visual_encoder is not None:
-            self.visual_encoder.gradient_checkpointing_disable()
-            self.visual_projector.gradient_checkpointing_disable()
-        if self.segmentor is not None:
-            self.segmentor.gradient_checkpointing_disable()
-            if hasattr(self, "seg_projector"):
-                self.seg_projector.gradient_checkpointing_disable()
-            if hasattr(self, "llm_projector"):
-                self.llm_projector.gradient_checkpointing_disable()
-            if hasattr(self, "seg_connector"):
-                self.seg_connector.gradient_checkpointing_disable()
+        self._toggle_module_gradient_checkpointing(self.llm, enable=False, module_name="llm")
+        self._toggle_module_gradient_checkpointing(
+            getattr(self, "visual_encoder", None),
+            enable=False,
+            module_name="visual_encoder",
+        )
+        self._toggle_module_gradient_checkpointing(
+            getattr(self, "visual_projector", None),
+            enable=False,
+            module_name="visual_projector",
+        )
+        self._toggle_module_gradient_checkpointing(
+            getattr(self, "segmentor", None),
+            enable=False,
+            module_name="segmentor",
+        )
+        self._toggle_module_gradient_checkpointing(
+            getattr(self, "seg_projector", None),
+            enable=False,
+            module_name="seg_projector",
+        )
+        self._toggle_module_gradient_checkpointing(
+            getattr(self, "llm_projector", None),
+            enable=False,
+            module_name="llm_projector",
+        )
+        self._toggle_module_gradient_checkpointing(
+            getattr(self, "seg_connector", None),
+            enable=False,
+            module_name="seg_connector",
+        )
 
     def init_weights(self):
         pass
@@ -1299,11 +1592,12 @@ class XSamModel(BaseModel):
 
         # Segmentor Encoder
         if self.segmentor is not None:
-            # TODO: add segmentor_encoder_adapter
             if self.use_segmentor_encoder_lora:
+                if self.segmentor_lora_module is None:
+                    raise RuntimeError("Segmentor LoRA is enabled but no wrapped segmentor module is registered.")
                 segmentor_encoder_path = osp.join(save_dir, "segmentor_encoder_adapter")
                 print_log(f"Saving segmentor_encoder adapter to {segmentor_encoder_path}", "current")
-                self.segmentor.encoder.save_pretrained(segmentor_encoder_path, **save_pretrained_kwargs)
+                self.segmentor_lora_module.save_pretrained(segmentor_encoder_path, **save_pretrained_kwargs)
             elif not self.freeze_segmentor_encoder:
                 segmentor_encoder_path = osp.join(save_dir, "segmentor_encoder")
                 print_log(f"Saving segmentor image_processor to {segmentor_encoder_path}", "current")

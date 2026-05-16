@@ -14,6 +14,45 @@ from .xsam import XSamModel
 class XSam3Model(XSamModel):
     """X-SAM model variant with a single SAM3 backbone."""
 
+    def _infer_trunk_hidden_size(self) -> int:
+        """Infer the SAM3 trunk embedding dimension.
+
+        Args:
+            None.
+        Returns:
+            The channels of SAM3 trunk hidden states before neck projection.
+        """
+        if self.segmentor is None or self.segmentor.encoder is None:
+            raise ValueError("Cannot infer SAM3 trunk hidden size without a segmentor encoder.")
+
+        trunk = getattr(getattr(self.segmentor.encoder, "vision_backbone", None), "trunk", None)
+        if trunk is not None:
+            patch_embed = getattr(trunk, "patch_embed", None)
+            patch_proj = getattr(patch_embed, "proj", None)
+            if patch_proj is not None and hasattr(patch_proj, "out_channels"):
+                return int(patch_proj.out_channels)
+
+            embed_dim = getattr(trunk, "embed_dim", None)
+            if embed_dim is not None:
+                return int(embed_dim)
+
+            blocks = getattr(trunk, "blocks", None)
+            if blocks:
+                block_attn = getattr(blocks[0], "attn", None)
+                qkv = getattr(block_attn, "qkv", None)
+                if qkv is not None and hasattr(qkv, "in_features"):
+                    return int(qkv.in_features)
+
+        encoder_config = getattr(self.segmentor.encoder, "config", None)
+        vision_config = getattr(encoder_config, "vision_config", None)
+        if vision_config is not None and getattr(vision_config, "hidden_size", None) is not None:
+            return int(vision_config.hidden_size)
+
+        if encoder_config is not None and getattr(encoder_config, "hidden_size", None) is not None:
+            return int(encoder_config.hidden_size)
+
+        raise ValueError("Cannot infer SAM3 trunk hidden size for XSam3Model projector.")
+
     def __init__(
         self,
         *args,
@@ -59,9 +98,9 @@ class XSam3Model(XSamModel):
         if self.segmentor is None:
             return
 
-        segmentor_hidden_size = getattr(self.segmentor.enc_config, "hidden_size", None)
-        if segmentor_hidden_size is None:
-            raise ValueError("`segmentor.enc_config.hidden_size` is required for XSam3Model.")
+        # XSam3 routes `lang_bast_layers` / `seg_bast_layers` through SAM3 trunk hidden states,
+        # so projector input dim must match the trunk embed dim instead of the FPN hidden size.
+        segmentor_hidden_size = self._infer_trunk_hidden_size()
 
         if self.llm is not None:
             visual_projector_config = DynamicProjectorConfig(
@@ -99,8 +138,9 @@ class XSam3Model(XSamModel):
             None.
         """
         super().activation_checkpointing_enable()
-        if hasattr(self, "visual_projector"):
-            self.visual_projector.gradient_checkpointing_enable()
+        visual_projector = getattr(self, "visual_projector", None)
+        if visual_projector is not None:
+            visual_projector.gradient_checkpointing_enable()
 
     def activation_checkpointing_disable(self):
         """Disable activation checkpointing for submodules.
@@ -111,8 +151,9 @@ class XSam3Model(XSamModel):
             None.
         """
         super().activation_checkpointing_disable()
-        if hasattr(self, "visual_projector"):
-            self.visual_projector.gradient_checkpointing_disable()
+        visual_projector = getattr(self, "visual_projector", None)
+        if visual_projector is not None:
+            visual_projector.gradient_checkpointing_disable()
 
     def _normalize_layer_ids(
         self,
@@ -304,6 +345,8 @@ class XSam3Model(XSamModel):
 
         if "pixel_values" in data_dict and data_dict["pixel_values"] is not None:
             trunk_capture_layers = None
+            lang_features = None
+            seg_features = None
             if self.llm is not None:
                 merged_layers = list(self.lang_bast_layers)
                 if hasattr(self, "seg_projector"):
@@ -348,10 +391,17 @@ class XSam3Model(XSamModel):
                             if pixel_values is None
                             else torch.cat([pixel_values, seg_projected_tokens], dim=1)
                         )
+                    del seg_features
+                    seg_features = None
+
+                del lang_features
+                lang_features = None
 
                 data_dict["pixel_values"] = pixel_values
             else:
                 data_dict["pixel_values"] = None
+
+            del seg_visual_outputs
 
             extra_data_dict = {
                 "extra_pixel_values": None,

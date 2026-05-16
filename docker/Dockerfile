@@ -15,7 +15,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.10 python3.10-venv python3-pip \
-    git git-lfs ca-certificates curl \
+    git git-lfs ca-certificates curl rsync aria2 wget \
     build-essential ninja-build pkg-config \
     ffmpeg libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 \
     && rm -rf /var/lib/apt/lists/* \
@@ -35,7 +35,8 @@ RUN python3.10 -m venv "${VENV_DIR}" \
     && python3.10 -m gdown --fuzzy "${FLASH_ATTN_WHEEL_URL}" -O "/tmp/wheels/${FLASH_ATTN_WHEEL_NAME}" \
     && echo "${FLASH_ATTN_WHEEL_SHA256}  /tmp/wheels/${FLASH_ATTN_WHEEL_NAME}" | sha256sum -c - \
     && "${VENV_DIR}/bin/pip" install "/tmp/wheels/${FLASH_ATTN_WHEEL_NAME}" \
-    && "${VENV_DIR}/bin/pip" install --no-deps xtuner==0.2.0
+    && "${VENV_DIR}/bin/pip" install --no-deps xtuner==0.2.0 \
+    && chmod -R a+rwX "${VENV_DIR}"
 RUN chmod +x /usr/local/bin/dev-entrypoint.sh
 
 ENV PATH="${VENV_DIR}/bin:${PATH}" \

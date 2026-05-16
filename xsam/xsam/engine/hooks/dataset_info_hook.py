@@ -83,13 +83,17 @@ class DatasetInfoHook(Hook):
         for ds in dataset:
             if self.tokenizer is None:
                 continue
+            if len(ds) == 0:
+                runner.logger.warning(f"{mode} of {ds.data_name} has 0 samples. Skip example logging.")
+                continue
 
             runner.logger.info(f"{mode} of {ds.data_name} example:")
-            if "chosen_ids" in ds[0]:
-                _log(ds[0]["chosen_ids"], log_prefix="chosen: ")
-                _log(ds[0]["rejected_ids"], log_prefix="rejected: ")
+            sample = ds[0]
+            if "chosen_ids" in sample:
+                _log(sample["chosen_ids"], log_prefix="chosen: ")
+                _log(sample["rejected_ids"], log_prefix="rejected: ")
             else:
-                _log(ds[0]["input_ids"])
+                _log(sample["input_ids"])
 
     def before_train(self, runner) -> None:
         do_train = runner.train_loop is not None

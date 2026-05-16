@@ -12,6 +12,7 @@ services:
         FLASH_ATTN_WHEEL_SHA256: ${FLASH_ATTN_WHEEL_SHA256:-91571f68f4113065dba4464a0d8d911f9e27969f139a6851c46668e06c2ac5f7}
     image: ${IMAGE_NAME:-xsam:cuda12.8-py310}
     container_name: ${DEV_CONTAINER_NAME:-xsam-dev}
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     working_dir: /workspace
     gpus: all
     ipc: host
@@ -31,13 +32,21 @@ services:
     environment:
       INSIDE_DOCKER: "1"
       VENV_DIR: /opt/venv
+      USER: ${HOST_USER:-xsam}
+      LOGNAME: ${HOST_USER:-xsam}
+      HOME: ${CONTAINER_HOME:-/workspace}
       CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
       GPU_PER_NODE: ${GPU_PER_NODE:-1}
       MASTER_ADDR: ${MASTER_ADDR:-127.0.0.1}
       MASTER_PORT: ${MASTER_PORT:-29500}
+      HF_USERNAME: ${HF_USERNAME:-}
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGINGFACE_HUB_TOKEN: ${HF_TOKEN:-}
       HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
       TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-0}
       HF_HOME: ${CONTAINER_HF_HOME:-/workspace/inits/huggingface}
+      TORCHINDUCTOR_CACHE_DIR: ${CONTAINER_HOME:-/workspace}/.cache/torchinductor
+      TRITON_CACHE_DIR: ${CONTAINER_HOME:-/workspace}/.cache/triton
       PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.8}
     volumes:
       - ${HOST_WORKSPACE:-..}:/workspace

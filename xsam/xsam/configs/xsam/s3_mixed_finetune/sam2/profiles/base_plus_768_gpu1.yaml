@@ -1,0 +1,51 @@
+profile_name: base_plus_768_gpu1
+llm_name: extracted_weights/lvlm/xsam_siglip2_hf
+seg_encoder_name: sam2.1-hiera-base-plus
+s1_pretrained_relpath: s1_seg_finetune/xsam_sam2_base_768_e3_gpu1_seg_finetune/pytorch_model.bin
+visual_encoder_pretrained_relpath: null
+projector_pretrained_relpath: extracted_weights/projectors/encoder_llm_projectors.bin
+llm_projector_pretrained_relpath: null
+s2_pretrained_relpath: __projector__
+segmentor_trunk_mode: full_ft
+segmentor_fpn_mode: full_ft
+segmentor_lora_rank: 16
+segmentor_lora_alpha: 32
+segmentor_lora_dropout: 0.05
+segmentor_lora_bias: none
+segmentor_lora_target_modules: null
+prompt_template: phi3_chat
+max_length: 2319
+batch_size: 1
+accumulative_counts: 4
+dataloader_num_workers: 2
+max_epochs: 1
+lr: 4.0e-5
+betas: [0.9, 0.999]
+weight_decay: 0.05
+max_norm: 1.0
+warmup_ratio: 0.03
+enable_lora: true
+enable_4bit_llm: true
+freeze_llm: true
+connector_type: null
+llm_attn_implementation: flash_attention_2
+seg_attn_implementation: flash_attention_2
+llava_split_mode: single
+persistent_workers: false
+use_train_ratio: true
+train_ratio:
+  llava_imgconv: 0.1
+  coco_panoptic_genseg: 0.1
+  refcoco_refseg: 0.1
+  refcoco_plus_refseg: 0.1
+  refcocog_refseg: 0.1
+  lisa_reaseg: 0.1
+  grandf_gcgseg: 0.1
+  refcocog_gcgseg: 0.1
+  psg_gcgseg: 0.1
+  flickr_gcgseg: 0.1
+  coco_vgdseg: 0.1
+save_steps: 300
+save_total_limit: 2
+logging_interval: 10
+evaluation_freq: 2000

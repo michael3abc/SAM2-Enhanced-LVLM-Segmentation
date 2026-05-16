@@ -1,20 +1,23 @@
 .venv/
 AGENTS.md
 .gradio
+.cache/
+.triton/
 
 runs/
 /data/
 inits/
 wkdrs/
 data/
-scripts/
+external/sam2/
+
 src
 /configs/
 
 __pycache__/
 *.py[cod]
+*.log
 *.pt
 *.pth
 *.bin
 *.npy
-

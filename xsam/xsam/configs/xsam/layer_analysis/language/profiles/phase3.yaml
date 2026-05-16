@@ -1,0 +1,36 @@
+profile_name: sam3_align_phase3_lora_unfreeze_trunk
+
+# Train policy
+freeze_llm: true
+enable_lora: true
+llm_lora_rank: 32
+llm_lora_alpha: 64
+llm_lora_dropout: 0.05
+llm_lora_target_modules: [q_proj, v_proj, o_proj]
+freeze_segmentor_trunk: false
+freeze_segmentor_fpn: true
+lang_bast_layers: [-1]
+seg_bast_layers: [-2]
+lang_downsample_ratio: 0.5
+seg_downsample_ratio: 0.5
+projector_depth: 2
+use_activation_checkpointing: false
+
+# Runtime
+enable_4bit_llm: true
+batch_size: 1
+accumulative_counts: 64
+dataloader_num_workers: 6
+persistent_workers: true
+prefetch_factor: 4
+pin_memory: true
+max_epochs: 0.25
+lr: 1.0e-4
+betas: [0.9, 0.999]
+weight_decay: 0.0
+max_norm: 1.0
+warmup_ratio: 0.03
+save_steps: 2000
+save_total_limit: 2
+logging_interval: 10
+evaluation_freq: 2000

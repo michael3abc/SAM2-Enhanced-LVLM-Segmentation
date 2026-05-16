@@ -58,7 +58,7 @@ class XSegmentorOutput(ModelOutput):
 
 
 class XSegmentor(PreTrainedModel):
-    supports_gradient_checkpointing = True
+    supports_gradient_checkpointing = False
 
     def __init__(self, encoder: Union[SamModel, Sam2Model, Sam3Model, Mask2FormerModel], decoder=None, torch_dtype=torch.float32, reinit_decoder=False, drop_decoder=False, close_cls=False, open_cls=False):  # type: ignore
         # transformers>=5 defaults to SDPA; force eager to avoid unsupported path
